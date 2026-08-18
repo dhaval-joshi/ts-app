@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Trading Station — Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;600;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { theme: { extend: { fontFamily: { sans: ['Roboto', 'sans-serif'] }, screens: { xs: '480px' } } } };
+</script>
+<link rel="stylesheet" href="/static/style.css?v=1787000000" />
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans min-h-screen">
+
+<!-- Server-unreachable warning -- full-screen, deliberately hard to miss and
+     not dismissible except by the connection actually coming back. Only
+     ever appears after 3 consecutive failed status checks (~15s), not on
+     a single blip. IMPORTANT LIMITATION: this only works if a browser tab
+     with this app is already open -- it cannot alert you if no tab is
+     open when the server goes down. -->
+<div id="serverDownWarning" class="hidden fixed inset-0 z-[100] bg-red-700 text-white flex items-center justify-center p-6">
+  <div class="max-w-lg text-center">
+    <span class="material-symbols-outlined !text-6xl mb-4">warning</span>
+    <h1 class="text-2xl font-bold mb-3">Connection to the Trading Station server has been lost</h1>
+    <p class="text-red-50 mb-2">
+      Programs, safeguards, and order management are NOT running right now. Any open positions have
+      NO active protection from this app until the connection is restored.
+    </p>
+    <p class="text-red-100 text-sm">
+      Check that the server process is still running and restart it if needed. This page will
+      automatically return to normal the moment the connection comes back -- no need to refresh.
+    </p>
+  </div>
+</div>
+
+<nav class="sticky top-0 z-40 flex items-center flex-wrap gap-x-2 gap-y-2 px-6 py-3 bg-white/95 backdrop-blur border-b border-slate-200 shadow-sm">
+  <a href="/" onclick="event.preventDefault(); switchSection('portfolio');" class="flex items-center gap-2 font-semibold text-lg mr-2">
+    <img src="/static/logo.svg" class="w-7 h-7 rounded-[0.3rem]" alt="" />
+    <span class="text-slate-900">Trading Station</span>
+  </a>
+  <button class="nav-link relative flex items-center gap-1.5 px-4 py-2 text-sm rounded-[0.3rem] text-slate-500" data-nav="regular" onclick="switchSection('regular')">
+    <span class="material-symbols-outlined !text-lg">receipt_long</span>Regular OMS
+  </button>
+  <button class="nav-link relative flex items-center gap-1.5 px-4 py-2 text-sm rounded-[0.3rem] text-slate-500" data-nav="advanced" onclick="switchSection('advanced')">
+    <span class="material-symbols-outlined !text-lg">bolt</span>Advanced OMS
+  </button>
+  <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
+    <span id="heartbeatWrap" class="flex items-center gap-2" title="System health"><span id="heartbeatDot" class="w-2 h-2 rounded-full bg-green-500"></span> system</span>
+    <span class="flex items-center gap-2"><span id="streamDot" class="w-2 h-2 rounded-full bg-red-500"></span> live feed</span>
+    <a href="/admin" title="Admin" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400 hover:text-slate-700"><span class="material-symbols-outlined !text-lg">settings</span></a>
+    <button type="button" onclick="logout()" title="Sign out" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400 hover:text-red-600"><span class="material-symbols-outlined !text-lg">logout</span></button>
+  </div>
+</nav>
+
+<main class="max-w-6xl mx-auto px-5 py-6 pb-16">
+
+  <!-- ============================== Portfolio (landing view) ============================== -->
+  <div id="section-portfolio" class="section-panel">
+    <h1 class="text-xl font-medium mb-4">Portfolio</h1>
+    <div id="portfolioKpis" class="mb-6"></div>
+
+    <div class="flex items-center justify-between mb-2">
+      <button type="button" onclick="portfolioCalendar.shiftMonth(-1)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+        <span class="material-symbols-outlined !text-base">chevron_left</span>Prev
+      </button>
+      <h2 id="portfolioMonthLabel" class="text-lg font-medium"></h2>
+      <button type="button" onclick="portfolioCalendar.shiftMonth(1)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+        Next<span class="material-symbols-outlined !text-base">chevron_right</span>
+      </button>
+    </div>
+    <p class="text-xs text-slate-400 mb-4">Combined across Regular and Advanced OMS. Click a day to see the orders.</p>
+    <div class="grid grid-cols-7 gap-1.5" id="portfolioCalendarWeekdays"></div>
+    <div class="grid grid-cols-7 gap-1.5 mt-1.5" id="portfolioCalendarGrid"></div>
+  </div>
+
+  <!-- ============================== Regular OMS ============================== -->
+  <div id="section-regular" class="section-panel hidden">
+    <div id="regularKpis" class="mb-5"></div>
+
+    <div class="flex gap-1 bg-white border-b border-slate-200 mb-5">
+      <button class="tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-blue-600 border-blue-600 font-semibold" data-tab="dashboard" onclick="switchTab('dashboard')">
+        <span class="material-symbols-outlined !text-lg">dashboard</span>Orders
+      </button>
+      <button class="tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-tab="strategies" onclick="switchTab('strategies')">
+        <span class="material-symbols-outlined !text-lg">tune</span>Strategies
+      </button>
+      <button class="tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-tab="calendar" onclick="switchTab('calendar')">
+        <span class="material-symbols-outlined !text-lg">calendar_month</span>Calendar
+      </button>
+      <button class="tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-tab="archive" onclick="switchTab('archive')">
+        <span class="material-symbols-outlined !text-lg">archive</span>Archive
+      </button>
+    </div>
+
+    <div id="tab-dashboard" class="tab-panel">
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-xl font-medium">Open &amp; recent orders</h1>
+        <span class="text-xs text-slate-400">Manually-placed orders only -- Advanced OMS legs live in their own section.</span>
+      </div>
+      <div id="bulkActions" class="flex items-center gap-3 mb-4">
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" id="selectAllBox" onchange="toggleSelectAll(this)" /> Select all closed
+        </label>
+        <button type="button" id="archiveSelectedBtn" onclick="archiveSelected()" disabled
+          class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-red-600 text-white shadow-sm hover:bg-red-700 disabled:pointer-events-none disabled:opacity-40">
+          <span class="material-symbols-outlined !text-base">archive</span>Archive selected (<span id="selectedCount">0</span>)
+        </button>
+      </div>
+      <div id="orderGrid" class="flex flex-col gap-3"></div>
+    </div>
+
+    <div id="tab-strategies" class="tab-panel hidden">
+      <div id="strategyListView">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h1 class="text-xl font-medium">Strategies</h1>
+            <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+              A strategy defines <em>how a position is managed after entry</em> — stop/target as a % or
+              points offset from wherever you actually enter, trailing rules, and when to time-close it.
+              Entry order type, validity, and exit legs are chosen per-trade in New Order.
+            </p>
+          </div>
+        </div>
+        <div class="flex items-center justify-between mb-4">
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" id="selectAllStrategies" onchange="toggleSelectAllStrategies(this)" /> Select all
+          </label>
+          <button type="button" id="deleteSelectedStrategiesBtn" onclick="deleteSelectedStrategies()" disabled
+            class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-red-600 text-white shadow-sm hover:bg-red-700 disabled:pointer-events-none disabled:opacity-40">
+            <span class="material-symbols-outlined !text-base">delete</span>Delete selected (<span id="selectedStrategyCount">0</span>)
+          </button>
+        </div>
+        <div id="strategyList" class="flex flex-col gap-3"></div>
+      </div>
+
+      <button type="button" onclick="showStrategyForm()" aria-label="New strategy" title="New strategy"
+        class="fixed bottom-24 right-7 z-30 flex items-center justify-center w-14 h-14 rounded-[0.3rem] shadow-xl bg-blue-600 text-white hover:bg-blue-700">
+        <span class="material-symbols-outlined !text-2xl">add</span>
+      </button>
+
+      <div id="strategyFormView" class="hidden">
+        <button type="button" onclick="hideStrategyForm()" class="relative inline-flex items-center gap-1.5 h-9 px-4 mb-4 rounded-[0.3rem] text-xs font-medium text-blue-600 shadow-sm hover:bg-blue-50">
+          <span class="material-symbols-outlined !text-base">arrow_back</span>Back to list
+        </button>
+
+        <form id="strategyForm" class="flex flex-col gap-5">
+          <fieldset class="border border-slate-200 rounded-xl p-5">
+            <legend class="px-2 text-sm font-medium text-blue-700">Identity</legend>
+            <div class="grid sm:grid-cols-3 gap-4">
+              <div><label class="field-label">Strategy name</label><input name="name" required placeholder="e.g. Intraday 1:2 trailing" class="field-input" /></div>
+              <div><label class="field-label">Product</label>
+                <select name="product" class="js-enhance-select field-input">
+                  <option value="intraday">Intraday</option>
+                  <option value="normal">Normal</option>
+                  <option value="delivery">Delivery</option>
+                </select>
+              </div>
+              <div><label class="field-label">Tick size</label><input name="tick_size" type="number" step="any" min="0" value="0.05" class="field-input" /></div>
+            </div>
+            <div class="text-xs text-slate-400 mt-3">
+              Tick size is the instrument's minimum price increment (0.05 for most NSE equity and F&amp;O
+              contracts). Computed SL/Target prices are rounded to the nearest multiple of this, or the
+              broker rejects the order (e.g. "price is not a multiple of tick size"). Check your
+              instrument's actual tick size if it's not the common 0.05.
+            </div>
+          </fieldset>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <fieldset class="border border-slate-200 rounded-xl p-5">
+              <legend class="px-2 text-sm font-medium text-blue-700">Stop loss</legend>
+              <div class="grid grid-cols-2 gap-4">
+                <div class="col-span-2"><label class="field-label">Offset unit</label>
+                  <select name="stop_offset_mode" class="js-enhance-select field-input">
+                    <option value="percent">Percent (%)</option>
+                    <option value="points">Points</option>
+                  </select>
+                </div>
+                <div><label class="field-label">Trigger offset from entry</label><input name="stop_trig_offset" type="number" step="any" value="1" required class="field-input" /></div>
+                <div><label class="field-label">Limit buffer past trigger</label><input name="stop_limit_offset" type="number" step="any" value="0" class="field-input" /></div>
+              </div>
+              <label class="flex items-center gap-2 text-sm mt-4 text-slate-700">
+                <input type="checkbox" name="stop_trailing_enabled" id="stopTrailEnabled" checked class="w-4 h-4" /> Enable trailing SL
+              </label>
+              <div class="grid grid-cols-2 gap-4 mt-3">
+                <div><label class="field-label">Trail by</label><input name="stop_trail_by" type="number" step="any" value="1" class="field-input" /></div>
+                <div><label class="field-label">Activation offset (profit)</label><input name="stop_activation_offset" type="number" step="any" value="0" class="field-input" /></div>
+              </div>
+            </fieldset>
+
+            <fieldset class="border border-slate-200 rounded-xl p-5">
+              <legend class="px-2 text-sm font-medium text-blue-700">Target</legend>
+              <div class="grid grid-cols-2 gap-4">
+                <div class="col-span-2"><label class="field-label">Offset unit</label>
+                  <select name="target_offset_mode" class="js-enhance-select field-input">
+                    <option value="percent">Percent (%)</option>
+                    <option value="points">Points</option>
+                  </select>
+                </div>
+                <div><label class="field-label">Trigger offset from entry</label><input name="target_trig_offset" type="number" step="any" value="2" required class="field-input" /></div>
+                <div><label class="field-label">Limit buffer past trigger</label><input name="target_limit_offset" type="number" step="any" value="0" class="field-input" /></div>
+              </div>
+              <label class="flex items-center gap-2 text-sm mt-4 text-slate-700">
+                <input type="checkbox" name="target_trailing_enabled" id="targetTrailEnabled" checked class="w-4 h-4" /> Enable trailing target
+              </label>
+              <div class="grid grid-cols-2 gap-4 mt-3">
+                <div><label class="field-label">Trail by</label><input name="target_trail_by" type="number" step="any" value="2" class="field-input" /></div>
+                <div><label class="field-label">Activation offset (profit)</label><input name="target_activation_offset" type="number" step="any" value="0" class="field-input" /></div>
+              </div>
+            </fieldset>
+          </div>
+          <div class="text-xs text-slate-400 -mt-2">
+            Trail-by and activation-offset use the same unit (percent or points) you picked for that leg's
+            offset above. Trailing only actually moves the order if the instrument you trade this strategy
+            on has a stream symbol set. See the README's field glossary for a plain-language explanation
+            of each of these four fields with worked examples.
+          </div>
+
+          <fieldset class="border border-slate-200 rounded-xl p-5">
+            <legend class="px-2 text-sm font-medium text-blue-700">Time-based close</legend>
+            <div class="grid sm:grid-cols-3 gap-4">
+              <div><label class="field-label">Mode</label>
+                <select name="time_exit_mode" id="timeExitMode" class="js-enhance-select field-input">
+                  <option value="none">No scheduled close</option>
+                  <option value="intraday_window">Intraday window (e.g. 15:10–15:15)</option>
+                  <option value="datetime">Specific date &amp; time</option>
+                </select>
+              </div>
+              <div class="hidden" id="windowFields">
+                <label class="field-label">Window start / end (HH:MM)</label>
+                <div class="flex gap-2">
+                  <input name="window_start" placeholder="15:10" class="field-input w-24" />
+                  <input name="window_end" placeholder="15:15" class="field-input w-24" />
+                </div>
+              </div>
+              <div class="hidden" id="atField">
+                <label class="field-label">Close at</label>
+                <input name="at" type="datetime-local" class="field-input" />
+              </div>
+            </div>
+          </fieldset>
+
+          <button type="button" onclick="document.getElementById('strategyForm').requestSubmit()"
+            class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium bg-blue-600 text-white shadow-sm hover:bg-blue-700 self-start">
+            Save strategy
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div id="tab-calendar" class="tab-panel hidden">
+      <div class="flex items-center justify-between mb-2">
+        <button type="button" onclick="regularCalendar.shiftMonth(-1)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+          <span class="material-symbols-outlined !text-base">chevron_left</span>Prev
+        </button>
+        <h1 id="monthLabel" class="text-lg font-medium"></h1>
+        <button type="button" onclick="regularCalendar.shiftMonth(1)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+          Next<span class="material-symbols-outlined !text-base">chevron_right</span>
+        </button>
+      </div>
+      <p class="text-xs text-slate-400 mb-4">Day totals are realized P&amp;L from orders closed that day, including archived ones. Click a day to see the orders.</p>
+      <div class="grid grid-cols-7 gap-1.5" id="calendarWeekdays"></div>
+      <div class="grid grid-cols-7 gap-1.5 mt-1.5" id="calendarGrid"></div>
+    </div>
+
+    <div id="tab-archive" class="tab-panel hidden">
+      <h1 class="text-xl font-medium mb-2">Archived orders</h1>
+      <p class="text-xs text-slate-400 mb-4">Archiving only moves the file into <code>data/orders/archive/</code> for tidiness -- it still counts toward Day/Overall P&amp;L and still shows in Calendar.</p>
+      <div id="archiveGrid" class="flex flex-col gap-3"></div>
+    </div>
+
+    <button type="button" onclick="showNewOrderDialog()" aria-label="New order" title="New order"
+      class="fixed bottom-7 right-7 z-30 flex items-center justify-center w-14 h-14 rounded-[0.3rem] shadow-xl bg-blue-600 text-white hover:bg-blue-700">
+      <span class="material-symbols-outlined !text-2xl">add</span>
+    </button>
+  </div>
+
+  <!-- ============================== Advanced OMS ============================== -->
+  <div id="section-advanced" class="section-panel hidden">
+    <div class="grid sm:grid-cols-2 gap-3 mb-5">
+      <div id="advancedLiveKpis" class="p-3 bg-green-50"></div>
+      <div id="advancedPaperKpis" class="p-3 bg-amber-50"></div>
+    </div>
+
+    <div class="flex gap-1 bg-white border-b border-slate-200 mb-5">
+      <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 adv-accent-text-600 adv-accent-border-600 font-semibold" data-adv-tab="programs" onclick="switchAdvTab('programs')">
+        <span class="material-symbols-outlined !text-lg">bolt</span>Programs
+      </button>
+      <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-adv-tab="riskgroups" onclick="switchAdvTab('riskgroups')">
+        <span class="material-symbols-outlined !text-lg">workspaces</span>Risk Groups
+      </button>
+      <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-adv-tab="archive" onclick="switchAdvTab('archive')">
+        <span class="material-symbols-outlined !text-lg">archive</span>Archive
+      </button>
+      <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-adv-tab="calendar" onclick="switchAdvTab('calendar')">
+        <span class="material-symbols-outlined !text-lg">calendar_month</span>Calendar
+      </button>
+    </div>
+
+    <div id="advtab-programs" class="adv-tab-panel">
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-xl font-medium">Programs</h1>
+        <button type="button" onclick="showNewProgramDialog()"
+          class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-bg-600 text-white shadow-sm">
+          <span class="material-symbols-outlined !text-base">add</span>New Program
+        </button>
+      </div>
+      <div class="flex items-center gap-3 mb-4">
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" id="selectAllPrograms" onchange="toggleSelectAllPrograms(this)" /> Select all
+        </label>
+        <button type="button" id="archiveSelectedProgramsBtn" onclick="archiveSelectedPrograms()" disabled
+          class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-red-600 text-white shadow-sm hover:bg-red-700 disabled:pointer-events-none disabled:opacity-40">
+          <span class="material-symbols-outlined !text-base">archive</span>Archive selected (<span id="selectedProgramCount">0</span>)
+        </button>
+      </div>
+      <div id="programList" class="flex flex-col gap-3"></div>
+    </div>
+
+    <div id="advtab-riskgroups" class="adv-tab-panel hidden">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h1 class="text-xl font-medium">Risk Groups</h1>
+          <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+            A correlation-based grouping you define (e.g. "Stock F&amp;O", "Commodity Oil", "Crypto") --
+            crossing a group's daily-loss cap halts every Program in it, even ones still under their own
+            cap. Sits between Program and Portfolio -- Portfolio-wide safeguards live in
+            <a href="/admin" class="adv-accent-text-600 hover:underline">Admin</a>.
+          </p>
+        </div>
+        <button type="button" onclick="showNewRiskGroupDialog()"
+          class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 shrink-0">
+          <span class="material-symbols-outlined !text-base">add</span>New Risk Group
+        </button>
+      </div>
+      <div id="riskGroupList" class="flex flex-col gap-2"></div>
+    </div>
+
+    <div id="advtab-archive" class="adv-tab-panel hidden">
+      <h1 class="text-xl font-medium mb-2">Archived Programs</h1>
+      <p class="text-xs text-slate-400 mb-4">
+        An archived Program never starts a new cycle, regardless of its status, until unarchived. Any
+        cycle already open at the moment of archiving keeps running normally to close.
+      </p>
+      <div id="archivedProgramList" class="flex flex-col gap-3"></div>
+    </div>
+
+    <div id="advtab-calendar" class="adv-tab-panel hidden">
+      <div class="flex items-center justify-between mb-2">
+        <button type="button" onclick="advancedCalendar.shiftMonth(-1)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+          <span class="material-symbols-outlined !text-base">chevron_left</span>Prev
+        </button>
+        <h1 id="advancedMonthLabel" class="text-lg font-medium"></h1>
+        <button type="button" onclick="advancedCalendar.shiftMonth(1)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+          Next<span class="material-symbols-outlined !text-base">chevron_right</span>
+        </button>
+      </div>
+      <p class="text-xs text-slate-400 mb-4">Day totals are realized P&amp;L from Advanced OMS cycles closed that day. Click a day to see the orders.</p>
+      <div class="grid grid-cols-7 gap-1.5" id="advancedCalendarWeekdays"></div>
+      <div class="grid grid-cols-7 gap-1.5 mt-1.5" id="advancedCalendarGrid"></div>
+    </div>
+  </div>
+
+</main>
+
+<!-- shared trade-details dialog -->
+<div id="dialogRoot" class="fixed inset-0 z-[60] items-center justify-center">
+  <div class="dialog-backdrop absolute inset-0" onclick="_closeModal()"></div>
+  <div class="relative z-10 w-11/12 sm:w-[520px] max-h-[85vh] overflow-y-auto scrollbars bg-white shadow-xl rounded-xl p-6">
+    <div class="flex items-start justify-between mb-3">
+      <h3 id="dialogTitle" class="text-lg font-medium text-slate-900"></h3>
+      <button type="button" onclick="_closeModal()" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="dialogBody"></div>
+  </div>
+</div>
+
+<!-- calendar day-order-list dialog -->
+<div id="dayDialogRoot" class="fixed inset-0 z-50 items-center justify-center">
+  <div class="dialog-backdrop absolute inset-0" onclick="closeDayDialog()"></div>
+  <div class="relative z-10 w-11/12 sm:w-[480px] max-h-[85vh] overflow-y-auto scrollbars bg-white shadow-xl rounded-xl p-6">
+    <div class="flex items-start justify-between mb-3">
+      <h3 id="dayDialogTitle" class="text-lg font-medium text-slate-900"></h3>
+      <button type="button" onclick="closeDayDialog()" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="dayDialogBody"></div>
+  </div>
+</div>
+
+<!-- Advanced OMS: Program create/edit dialog -->
+<div id="programDialogRoot" class="fixed inset-0 z-50 items-center justify-center">
+  <div class="dialog-backdrop absolute inset-0" onclick="closeProgramDialog()"></div>
+  <div class="relative z-10 w-11/12 lg:w-[760px] max-h-[90vh] overflow-y-auto scrollbars bg-white shadow-xl rounded-xl p-6">
+    <div class="flex items-start justify-between mb-3">
+      <h3 id="programDialogTitle" class="text-lg font-medium text-slate-900">New Program</h3>
+      <div class="flex items-center gap-2">
+        <button type="button" id="programDialogSaveBtn" title="Save" onclick="submitCurrentProgramDialogForm()" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] adv-accent-bg-600 text-white shadow-sm"><span class="material-symbols-outlined">check</span></button>
+        <button type="button" title="Close" onclick="closeProgramDialog()" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400"><span class="material-symbols-outlined">close</span></button>
+      </div>
+    </div>
+    <div id="programDialogBody"></div>
+  </div>
+</div>
+
+<!-- Regular OMS: New Order dialog -->
+<div id="orderDialogRoot" class="fixed inset-0 z-50 items-center justify-center">
+  <div class="dialog-backdrop absolute inset-0" onclick="closeOrderDialog()"></div>
+  <div class="relative z-10 w-11/12 lg:w-[820px] max-h-[90vh] overflow-y-auto scrollbars bg-white shadow-xl rounded-xl p-6">
+    <div class="flex items-start justify-between mb-3">
+      <h3 id="orderDialogTitle" class="text-lg font-medium text-slate-900">Place an order</h3>
+      <div class="flex items-center gap-2">
+        <button type="button" title="Save" onclick="document.getElementById('orderForm').requestSubmit()" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] bg-blue-600 text-white shadow-sm"><span class="material-symbols-outlined">check</span></button>
+        <button type="button" title="Close" onclick="closeOrderDialog()" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400"><span class="material-symbols-outlined">close</span></button>
+      </div>
+    </div>
+
+    <form id="orderForm" class="flex flex-col gap-5">
+
+      <fieldset class="border border-slate-200 rounded-xl p-5">
+        <legend class="px-2 text-sm font-medium text-blue-700">Instrument</legend>
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div><label class="field-label">Label</label><input name="label" placeholder="e.g. NIFTY 24500 CE breakout" class="field-input" /></div>
+          <div><label class="field-label">Symbol ID (symId)</label><input name="sym_id" required placeholder="EQT_RELIANCE_EQ_NSE" class="field-input" /></div>
+          <div><label class="field-label">Stream symbol</label><input name="stream_symbol" placeholder="2885_NSE" class="field-input" /></div>
+        </div>
+        <div class="text-xs text-amber-600 mt-2 hidden" id="exchangeMismatchWarning"></div>
+
+        <div class="grid sm:grid-cols-2 gap-4 mt-4">
+          <div><label class="field-label">Side</label>
+            <select name="side" class="js-enhance-select field-input"><option value="buy">Buy</option><option value="sell">Sell</option></select>
+          </div>
+          <div>
+            <label class="field-label">Entry / reference price</label>
+            <div class="flex gap-2">
+              <input name="entry_price" type="number" step="any" min="0" class="field-input flex-1" />
+              <button type="button" id="fetchPriceBtn" onclick="fetchPrice()" class="relative inline-flex items-center gap-1.5 h-[42px] px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 whitespace-nowrap">
+                <span class="material-symbols-outlined !text-base">refresh</span>Fetch price
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="text-xs text-slate-400 mt-2" id="fetchPriceStatus"></div>
+        <div class="text-xs text-slate-400 mt-2">
+          Drives capital-based sizing and a capital-utilized preview either way. Also sent as the entry
+          limit/trigger price below if the entry type needs one — rounded UP to the strategy's tick size.
+          Stream symbol (above) is only needed for trailing, live P&amp;L, and the Fetch price button --
+          leave it blank if you don't need any of those for this order.
+        </div>
+      </fieldset>
+
+      <fieldset class="border border-slate-200 rounded-xl p-5">
+        <legend class="px-2 text-sm font-medium text-blue-700">Entry order</legend>
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div><label class="field-label">Entry order type</label>
+            <select name="entry_type" id="entryTypeSelect" class="js-enhance-select field-input">
+              <option value="market">Market</option>
+              <option value="limit">Limit</option>
+              <option value="stoplimit">Stop-limit</option>
+              <option value="stopmarket">Stop-market</option>
+            </select>
+          </div>
+          <div><label class="field-label">Validity</label>
+            <select name="entry_validity" class="js-enhance-select field-input">
+              <option value="day">Day</option>
+              <option value="ioc">IOC</option>
+              <option value="eos">EOS</option>
+              <option value="gtc">GTC</option>
+            </select>
+          </div>
+          <div class="hidden" id="entryTrigField">
+            <label class="field-label">Entry trigger price</label><input name="entry_trig_price" type="number" step="any" class="field-input" />
+          </div>
+        </div>
+        <div class="text-xs text-slate-400 mt-2" id="marketProtHint">
+          Market/stop-market orders automatically include a 5% price-protection band, as Tradejini
+          requires for API orders — nothing to configure.
+        </div>
+      </fieldset>
+
+      <fieldset class="border border-slate-200 rounded-xl p-5">
+        <legend class="px-2 text-sm font-medium text-blue-700">Sizing</legend>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <div><label class="field-label">Lot size</label><input name="lot_size" type="number" step="1" min="1" value="1" class="field-input" /></div>
+          <div><label class="field-label">Sizing method</label>
+            <select id="sizingMode" class="js-enhance-select field-input">
+              <option value="lots">By number of lots</option>
+              <option value="capital">By capital allocation</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid sm:grid-cols-2 gap-4 mt-4" id="lotsSizingFields">
+          <div><label class="field-label">Number of lots</label><input name="num_lots" type="number" step="1" min="1" value="1" class="field-input" /></div>
+        </div>
+
+        <div class="grid sm:grid-cols-2 gap-4 mt-4 hidden" id="capitalSizingFields">
+          <div><label class="field-label">Capital to allocate (₹)</label><input name="capital" type="number" step="any" min="0" class="field-input" /></div>
+        </div>
+        <div class="text-xs text-slate-400 mt-2 hidden" id="capitalHint">
+          Quantity is estimated as capital ÷ (entry/reference price + 2 point slippage buffer), then
+          rounded down to a whole number of lots — the buffer avoids the order being sized too tight
+          and getting rejected if price ticks slightly before your entry fills.
+        </div>
+
+        <div class="text-xs text-slate-400 mt-2" id="sizingPreview"></div>
+      </fieldset>
+
+      <fieldset class="border border-slate-200 rounded-xl p-5">
+        <legend class="px-2 text-sm font-medium text-blue-700">Strategy &amp; exit legs</legend>
+        <div>
+          <label class="field-label">Apply strategy</label>
+          <select name="strategy_name" id="strategyPicker" required class="js-enhance-select field-input">
+            <option value="">— choose a strategy —</option>
+          </select>
+        </div>
+        <div class="text-xs text-slate-400 mt-2 hidden" id="noStrategyHint">
+          No strategies yet — <button type="button" onclick="closeOrderDialog(); switchSection('regular'); switchTab('strategies')" class="text-blue-600 underline">create one first</button>.
+        </div>
+
+        <div class="mt-4">
+          <label class="field-label">Exit legs</label>
+          <select name="exit_mode" id="exitModeSelect" class="js-enhance-select field-input">
+            <option value="both">Both — Stop-loss &amp; Target</option>
+            <option value="sl_only">Stop-loss only</option>
+            <option value="target_only">Target only</option>
+            <option value="none">Neither — manual/time-based close only</option>
+          </select>
+        </div>
+        <div class="text-xs text-slate-400 mt-2" id="exitModeHint"></div>
+
+        <div id="strategyPreview" class="hidden mt-4 bg-slate-50 border border-slate-200 rounded-xl p-4"></div>
+        <div id="trailingWarning" class="hidden mt-3 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-xl p-3"></div>
+      </fieldset>
+
+      <div class="flex gap-3">
+        <button type="button" onclick="document.getElementById('orderForm').requestSubmit()"
+          class="relative inline-flex items-center justify-center gap-1.5 h-11 px-6 rounded-[0.3rem] text-sm font-medium bg-blue-600 text-white shadow-sm hover:bg-blue-700">
+          Place order
+        </button>
+        <button type="button" onclick="closeOrderDialog()"
+          class="relative inline-flex items-center justify-center gap-1.5 h-11 px-6 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+          Close
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- snackbar -->
+<div id="snackbar" class="fixed left-4 right-4 sm:left-auto sm:right-4 sm:w-80 flex items-center gap-4 py-3 px-4 rounded-[0.3rem] shadow-lg text-white bg-slate-800 z-50 text-sm">
+  <p class="flex-1" data-snackbar-text></p>
+</div>
+
+<script src="/static/app.js?v=1787400000"></script>
+<script src="/static/dashboard.js?v=1787400000"></script>
+<script src="/static/archive.js?v=1787400000"></script>
+<script src="/static/calendar.js?v=1787400000"></script>
+<script src="/static/order.js?v=1787400000"></script>
+<script src="/static/strategies.js?v=1787400000"></script>
+<script src="/static/programs.js?v=1787400000"></script>
+<script src="/static/tabs.js?v=1787400000"></script>
+</body>
+</html>

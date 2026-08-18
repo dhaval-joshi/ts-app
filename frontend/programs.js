@@ -1,0 +1,887 @@
+let allPrograms = [];
+let allRiskGroups = [];
+let indicesCache = [];
+let editingProgramId = null;
+let editingRiskGroupId = null;
+
+const PROGRAM_STATUS_LABEL = {
+  running: "Running",
+  stopped_by_user: "Stopped",
+  halted_consecutive_loss: "Halted — consecutive losses",
+  halted_daily_loss: "Halted — daily loss cap",
+  halted_risk_group: "Halted — Risk Group cap",
+  halted_portfolio: "Halted — portfolio cap",
+};
+const PROGRAM_STATUS_CLASS = {
+  running: "adv-accent-bg-50 adv-accent-text-700 adv-accent-border-200",
+  stopped_by_user: "bg-slate-100 text-slate-600 border-slate-200",
+  halted_consecutive_loss: "bg-red-50 text-red-700 border-red-200",
+  halted_daily_loss: "bg-red-50 text-red-700 border-red-200",
+  halted_risk_group: "bg-red-50 text-red-700 border-red-200",
+  halted_portfolio: "bg-red-50 text-red-700 border-red-200",
+};
+const HALT_STATUSES = ["halted_consecutive_loss", "halted_daily_loss", "halted_risk_group", "halted_portfolio"];
+
+// ------------------------------------------------------------ tab entry
+
+async function loadAdvancedOms() {
+  try {
+    const [programsList, riskGroups, indices, allOrders] = await Promise.all([
+      api("/api/programs"),
+      api("/api/risk-groups"),
+      api("/api/indices"),
+      api("/api/orders"),
+    ]);
+    allPrograms = programsList;
+    allRiskGroups = riskGroups;
+    indicesCache = indices;
+
+    const programOrders = allOrders.filter((o) => o.program_id);
+    const programModeById = {};
+    allPrograms.forEach((p) => { programModeById[p.config.program_id] = p.config.mode; });
+    const liveOrders = programOrders.filter((o) => programModeById[o.program_id] !== "paper");
+    const paperOrders = programOrders.filter((o) => programModeById[o.program_id] === "paper");
+
+    const liveKpiEl = document.getElementById("advancedLiveKpis");
+    if (liveKpiEl) liveKpiEl.innerHTML = kpiCardsHtml(computeSummary(liveOrders), { title: "Live Programs only" });
+    const paperKpiEl = document.getElementById("advancedPaperKpis");
+    if (paperKpiEl) paperKpiEl.innerHTML = kpiCardsHtml(computeSummary(paperOrders), { title: "Paper Programs only" });
+
+    renderProgramsTab(allOrders);
+    renderRiskGroupsTab();
+    renderArchivedProgramsTab(allOrders);
+  } catch (e) {
+    toast("Couldn't load Advanced OMS: " + e.message, "error");
+  }
+}
+
+function riskGroupName(id) {
+  const g = allRiskGroups.find((x) => x.risk_group_id === id);
+  return g ? g.name : "— none —";
+}
+
+function scheduleSummary(schedule) {
+  if (!schedule) return "";
+  if (schedule.continuous) {
+    return `Continuous${schedule.inter_cycle_delay_seconds ? ` · ${schedule.inter_cycle_delay_seconds}s between cycles` : ""}`;
+  }
+  const dayBit = schedule.days === "expiry_day" ? "expiry day only" : "every day";
+  const delayBit = schedule.inter_cycle_delay_seconds ? ` · ${schedule.inter_cycle_delay_seconds}s between cycles` : "";
+  return `${schedule.start_time}–${schedule.end_time}, ${dayBit}${delayBit}`;
+}
+
+function renderProgramsTab(allOrders) {
+  const el = document.getElementById("programList");
+  if (!el) return;
+  selectedProgramIds.clear(); // selection doesn't persist across a full data refresh, same as
+                               // Regular OMS's own order bulk-select
+  const active = allPrograms.filter((p) => !p.archived);
+  el.innerHTML = active.length
+    ? active.map((p) => programCardHtml(p, allOrders)).join("")
+    : `<div class="text-center text-slate-400 py-12">No Programs yet -- click "New Program" to set one up.</div>`;
+  updateProgramBulkBar();
+}
+
+function renderRiskGroupsTab() {
+  const el = document.getElementById("riskGroupList");
+  if (el) {
+    el.innerHTML = allRiskGroups.length
+      ? allRiskGroups.map(riskGroupRowHtml).join("")
+      : `<div class="text-xs text-slate-400">No Risk Groups yet.</div>`;
+  }
+}
+
+function renderArchivedProgramsTab(allOrders) {
+  const el = document.getElementById("archivedProgramList");
+  if (!el) return;
+  const archived = allPrograms.filter((p) => p.archived);
+  el.innerHTML = archived.length
+    ? archived.map((p) => programCardHtml(p, allOrders, { archived: true })).join("")
+    : `<div class="text-center text-slate-400 py-12">No archived Programs.</div>`;
+}
+
+function riskGroupRowHtml(g) {
+  const memberCount = allPrograms.filter((p) => p.config.risk_group_id === g.risk_group_id).length;
+  return `
+  <div class="flex items-center justify-between border border-slate-200 rounded-[0.3rem] px-4 py-2.5">
+    <div>
+      <div class="text-sm font-medium text-slate-900">${g.name}</div>
+      <div class="text-xs text-slate-400">${memberCount} Program(s) · cap: ${g.daily_loss_amount_override !== null && g.daily_loss_amount_override !== undefined ? "₹" + fmt(g.daily_loss_amount_override) + " (override)" : "sum of members' own caps"}</div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button type="button" onclick="editRiskGroup('${g.risk_group_id}')" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400 adv-accent-hover-text-600"><span class="material-symbols-outlined !text-lg">edit</span></button>
+      <button type="button" onclick="deleteRiskGroup('${g.risk_group_id}')" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400 hover:text-red-600"><span class="material-symbols-outlined !text-lg">delete</span></button>
+    </div>
+  </div>`;
+}
+
+// ------------------------------------------------------------- program card
+
+function activeLegsInnerHtml(activeLegs) {
+  if (!activeLegs.length) {
+    return `<div class="text-xs text-slate-400 mt-3">No active cycle right now.</div>`;
+  }
+  const activeCyclePnl = activeLegs.reduce((sum, o) => {
+    const p = o.pnl && (o.pnl.realized ?? o.pnl.unrealized);
+    return sum + (typeof p === "number" ? p : 0);
+  }, 0);
+  const activeCycleHasUnknown = activeLegs.some((o) => !o.pnl || (o.pnl.realized == null && o.pnl.unrealized == null));
+
+  return `<div class="mt-3">
+        <div class="flex items-center justify-between text-xs mb-1.5">
+          <span class="text-slate-400">Current cycle P&amp;L (live)</span>
+          <span class="font-semibold ${pnlColorClass(activeCyclePnl)}">${signed(activeCyclePnl)}${activeCycleHasUnknown ? " *" : ""}</span>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+        ${activeLegs.map((o) => {
+          const p = o.pnl && (o.pnl.realized ?? o.pnl.unrealized);
+          const isRealized = o.pnl && o.pnl.realized != null;
+          const isClosing = o.status === "closing";
+          // "closing" is NOT still live -- ticks stop updating this leg's
+          // unrealized P&L the moment status leaves "watching", so what's
+          // shown is a FROZEN snapshot from the instant the close fired,
+          // not a continuously-updating figure. Labeling it "(live)" here
+          // would be actively misleading about what the number represents.
+          const pnlLabel = isRealized ? " (closed)" : isClosing ? " (at trigger, pending confirmation)" : " (live)";
+          const pnlText = typeof p === "number" ? `${signed(p)}${pnlLabel}` : "unknown";
+          const pnlCls = typeof p === "number" ? pnlColorClass(p) : "text-slate-400";
+          return `
+          <div class="border border-slate-200 rounded-[0.3rem] p-2.5">
+            <div class="text-xs font-medium text-slate-900">${o.program_leg} — ${o.sym_id}</div>
+            <div class="text-xs text-slate-400">${STATUS_LABEL[o.status] || o.status} · entry ${fmt(o.entry.avg_price)}</div>
+            <div class="text-xs font-medium ${pnlCls} mt-0.5">${pnlText}</div>
+            <div class="text-[11px] text-slate-400 mt-1">SL ${fmt(o.stop && o.stop.current_trig_price)} · Target ${fmt(o.target && o.target.current_trig_price)} <span class="text-slate-300">(live, in-memory)</span></div>
+          </div>`;
+        }).join("")}
+        </div>
+        ${activeCycleHasUnknown ? `<div class="text-[11px] text-slate-400 mt-1">* at least one leg's P&amp;L isn't known yet (still resolving with the broker)</div>` : ""}
+       </div>`;
+}
+
+function programCardHtml(program, allOrders, opts = {}) {
+  const cfg = program.config;
+  const rt = program.runtime;
+  const index = indicesCache.find((i) => i.index_id === cfg.index_id);
+  const statusClass = PROGRAM_STATUS_CLASS[rt.status] || "bg-slate-100 text-slate-600 border-slate-200";
+  const isHalted = HALT_STATUSES.includes(rt.status);
+  const isStopped = rt.status === "stopped_by_user";
+  const activeLegs = rt.active_cycle_id ? allOrders.filter((o) => o.cycle_id === rt.active_cycle_id) : [];
+
+  const haltBanner = isHalted
+    ? `<div class="mt-3 rounded-xl border border-red-200 bg-red-50 p-3.5 shadow-sm">
+         <div class="flex items-center gap-2 text-red-700 font-medium text-sm">
+           <span class="material-symbols-outlined !text-lg">warning</span>${PROGRAM_STATUS_LABEL[rt.status]}
+         </div>
+         <div class="text-red-700 text-xs mt-1">
+           ${rt.status === "halted_risk_group" ? `Its Risk Group ("${riskGroupName(cfg.risk_group_id)}") crossed its daily loss cap -- this Program's own numbers may still be fine, another Program in the same group pulled the group past it. ` : ""}
+           No new cycle will start until you review and resume. Any currently-open legs (none right now, since a cycle only halts once both legs are closed) keep running their own SL/Target untouched.
+         </div>
+       </div>`
+    : "";
+
+  const cooldownNote = rt.cooldown_until && new Date(rt.cooldown_until) > new Date()
+    ? `<div class="text-xs text-amber-600 mt-1">Cooling down until ${rt.cooldown_until.replace("T", " ")} (max cycles/day throttle).</div>`
+    : "";
+
+  const activeLegsHtml = `<div id="active-legs-${cfg.program_id}">${activeLegsInnerHtml(activeLegs)}</div>`;
+
+  return `
+  <div class="relative ${cfg.mode === "paper" ? "bg-amber-50 border-amber-200" : "bg-white border-slate-200"} border shadow-sm rounded-xl p-5">
+    <input type="checkbox" class="program-checkbox absolute top-5 left-5 w-4 h-4" data-program-id="${cfg.program_id}" onchange="onProgramCheckboxChange(this)" />
+    <div class="flex items-start justify-between gap-3 pl-6">
+      <div>
+        <div class="text-base font-medium text-slate-900">${cfg.name}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${index ? index.disp_name : cfg.index_id} · ${cfg.product} · ${cfg.lots_per_leg} lot(s)/leg · Risk Group: ${riskGroupName(cfg.risk_group_id)}</div>
+        <div class="text-xs text-slate-400">${scheduleSummary(cfg.schedule)}</div>
+      </div>
+      <span class="shrink-0 flex items-center gap-1.5">
+        ${opts.archived ? `<span class="inline-flex items-center h-6 px-3 rounded-[0.3rem] text-[11px] font-medium uppercase tracking-wide border shadow-sm bg-slate-100 text-slate-500 border-slate-200">Archived</span>` : ""}
+        ${cfg.mode === "paper" ? `<span class="inline-flex items-center h-6 px-3 rounded-[0.3rem] text-[11px] font-medium uppercase tracking-wide border shadow-sm bg-amber-100 text-amber-800 border-amber-300">Paper</span>` : ""}
+        <span class="inline-flex items-center h-6 px-3 rounded-[0.3rem] text-[11px] font-medium uppercase tracking-wide border shadow-sm ${statusClass}">${PROGRAM_STATUS_LABEL[rt.status] || rt.status}</span>
+      </span>
+    </div>
+
+    ${haltBanner}
+    ${cooldownNote}
+
+    <div class="grid grid-cols-4 gap-3 mt-4">
+      <div><div class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Cycles today</div><div class="text-sm font-medium text-slate-900">${rt.cycles_today}</div></div>
+      <div><div class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Consecutive losses</div><div class="text-sm font-medium text-slate-900">${rt.consecutive_losses} / ${cfg.safeguards.consecutive_loss_limit}</div></div>
+      <div><div class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Today's P&amp;L</div><div class="text-sm font-medium ${pnlColorClass(rt.daily_realized_pnl)}">${signed(rt.daily_realized_pnl)}</div></div>
+      <div><div class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Daily loss cap</div><div class="text-sm font-medium text-slate-900">₹${fmt(cfg.safeguards.daily_loss_amount)}</div></div>
+    </div>
+
+    ${activeLegsHtml}
+
+    <div class="mt-4 pt-4 border-t border-slate-200 flex flex-wrap items-center gap-2">
+      ${opts.archived
+        ? `<button type="button" onclick="unarchiveProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-bg-600 text-white shadow-sm"><span class="material-symbols-outlined !text-base">unarchive</span>Unarchive</button>`
+        : `
+      ${isHalted || isStopped
+        ? `<button type="button" onclick="resumeProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-bg-600 text-white shadow-sm"><span class="material-symbols-outlined !text-base">play_arrow</span>Resume</button>`
+        : `<button type="button" onclick="stopProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">pause</span>Stop</button>`}
+      <button type="button" onclick="flattenProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-red-600 text-white shadow-sm hover:bg-red-700"><span class="material-symbols-outlined !text-base">stop_circle</span>Stop &amp; Flatten</button>
+      <button type="button" onclick="archiveProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">archive</span>Archive</button>
+      <button type="button" onclick="editProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">edit</span>Edit</button>
+      <button type="button" onclick="cloneProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">content_copy</span>Clone</button>`
+      }
+      <button type="button" onclick="showProgramOrders('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">receipt_long</span>Orders</button>
+      <button type="button" onclick="showProgramCycles('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">history</span>Cycles (${(program.cycles || []).length})</button>
+      <button type="button" onclick="deleteProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium text-red-600 shadow-sm hover:bg-red-50"><span class="material-symbols-outlined !text-base">delete</span>Delete</button>
+      <button type="button" onclick="toggleProgramLogs('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-text-600 shadow-sm adv-accent-hover-bg-50">Logs (${(program.logs || []).length})</button>
+    </div>
+    <div class="logs hidden mt-3 pt-3 border-t border-slate-200 text-xs text-slate-400 max-h-36 overflow-y-auto scrollbars space-y-1" id="program-logs-${cfg.program_id}">
+      ${(program.logs || []).slice().reverse().map((l) => `<div>${l.ts.replace("T", " ")} — ${l.msg}</div>`).join("")}
+    </div>
+  </div>`;
+}
+
+function toggleProgramLogs(id) {
+  document.getElementById(`program-logs-${id}`).classList.toggle("hidden");
+}
+
+async function stopProgram(id) {
+  if (!confirm("Stop this Program? Any active cycle finishes naturally (its legs keep their own SL/Target); no new cycle will start.")) return;
+  try {
+    await api(`/api/programs/${id}/stop`, { method: "POST" });
+    toast("Program stopped.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to stop: " + e.message, "error");
+  }
+}
+
+async function resumeProgram(id) {
+  try {
+    await api(`/api/programs/${id}/resume`, { method: "POST" });
+    toast("Program resumed.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to resume: " + e.message, "error");
+  }
+}
+
+async function flattenProgram(id) {
+  if (!confirm("Stop this Program AND close any open legs right now at market? This can't be undone.")) return;
+  try {
+    await api(`/api/programs/${id}/flatten`, { method: "POST" });
+    toast("Program stopped and flattened.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to flatten: " + e.message, "error");
+  }
+}
+
+async function deleteProgram(id) {
+  if (!confirm("Delete this Program? This only removes the Program itself -- its past orders/cycle history stay on disk.")) return;
+  try {
+    await api(`/api/programs/${id}`, { method: "DELETE" });
+    toast("Program deleted.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to delete: " + e.message, "error");
+  }
+}
+
+async function archiveProgram(id) {
+  if (!confirm("Archive this Program? It will never start a new cycle until unarchived. If a cycle is currently open, it keeps running normally to close.")) return;
+  try {
+    await api(`/api/programs/${id}/archive`, { method: "POST" });
+    toast("Program archived.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to archive: " + e.message, "error");
+  }
+}
+
+async function unarchiveProgram(id) {
+  try {
+    await api(`/api/programs/${id}/unarchive`, { method: "POST" });
+    toast("Program unarchived -- eligible to trade again.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to unarchive: " + e.message, "error");
+  }
+}
+
+// ------------------------------------------------------------- create/edit
+
+function closeProgramDialog() {
+  document.getElementById("programDialogRoot").classList.remove("show");
+}
+
+function programFormHtml(p) {
+  const cfg = p ? p.config : {
+    name: "", index_id: "", risk_group_id: null, product: "intraday", mode: "live",
+    min_working_days_to_expiry: 2, lots_per_leg: 1, sizing_mode: "lots", capital_per_leg: null,
+    stop: { offset_mode: "percent", trig_offset: 20, limit_offset: 0, trailing: { enabled: true, trail_by: 5, activation_offset: 0 } },
+    target: { offset_mode: "percent", trig_offset: 40, limit_offset: 0, trailing: { enabled: true, trail_by: 10, activation_offset: 0 } },
+    time_exit: { mode: "intraday_window", window_start: "15:10", window_end: "15:15", at: null },
+    safeguards: { consecutive_loss_limit: 3, daily_loss_amount: 5000, max_cycles_per_day: 5, cooldown_minutes: 5 },
+    schedule: { continuous: false, start_time: "09:15", end_time: "14:55", days: "all", inter_cycle_delay_seconds: 0 },
+  };
+  const indexOptions = indicesCache.map((i) => `<option value="${i.index_id}" ${i.index_id === cfg.index_id ? "selected" : ""}>${i.disp_name}</option>`).join("");
+  const riskGroupOptions = allRiskGroups.map((g) => `<option value="${g.risk_group_id}" ${g.risk_group_id === cfg.risk_group_id ? "selected" : ""}>${g.name}</option>`).join("");
+
+  return `
+  <form id="programForm" class="flex flex-col gap-5">
+    <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Identity</legend>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="field-label">Program name</label><input name="name" required value="${cfg.name}" placeholder="e.g. NIFTY ATM Straddle" class="field-input" /></div>
+        <div><label class="field-label">Underlying index</label>
+          <select name="index_id" required class="js-enhance-select field-input">
+            <option value="">${indicesCache.length ? "— choose —" : "No indices loaded yet -- check the app is logged in"}</option>
+            ${indexOptions}
+          </select>
+        </div>
+        <div><label class="field-label">Risk Group</label>
+          <select name="risk_group_id" required class="js-enhance-select field-input">
+            <option value="">${allRiskGroups.length ? "— choose —" : "No Risk Groups yet -- create one below first"}</option>
+            ${riskGroupOptions}
+          </select>
+        </div>
+        <div><label class="field-label">Product</label>
+          <select name="product" class="js-enhance-select field-input">
+            <option value="intraday" ${cfg.product === "intraday" ? "selected" : ""}>Intraday</option>
+            <option value="normal" ${cfg.product === "normal" ? "selected" : ""}>Normal</option>
+            <option value="delivery" ${cfg.product === "delivery" ? "selected" : ""}>Delivery</option>
+          </select>
+        </div>
+        <div><label class="field-label">Mode</label>
+          <select name="mode" class="js-enhance-select field-input">
+            <option value="live" ${cfg.mode === "live" ? "selected" : ""}>Live -- real orders</option>
+            <option value="paper" ${cfg.mode === "paper" ? "selected" : ""}>Paper -- simulated, no real orders</option>
+          </select>
+        </div>
+        <div><label class="field-label">Min working days to expiry</label><input name="min_working_days_to_expiry" type="number" min="0" step="1" value="${cfg.min_working_days_to_expiry}" class="field-input" /></div>
+      </div>
+    </fieldset>
+
+    <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Sizing</legend>
+      <p class="text-xs text-slate-400 mb-3">Capital sizing gives each leg the SAME rupee allocation (lot counts may differ between CE/PE, since their premiums differ) -- predictable risk on both sides regardless of which side is pricier that day, rather than strictly equal contract counts.</p>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="field-label">Sizing method</label>
+          <select name="sizing_mode" id="programSizingMode" class="js-enhance-select field-input"
+            onchange="document.getElementById('lotsSizingField').classList.toggle('hidden', this.value !== 'lots'); document.getElementById('capitalSizingField').classList.toggle('hidden', this.value !== 'capital');">
+            <option value="lots" ${cfg.sizing_mode === "lots" ? "selected" : ""}>By number of lots (equal both legs)</option>
+            <option value="capital" ${cfg.sizing_mode === "capital" ? "selected" : ""}>By capital allocation (equal capital, lots may differ)</option>
+          </select>
+        </div>
+        <div id="lotsSizingField" class="${cfg.sizing_mode === "capital" ? "hidden" : ""}">
+          <label class="field-label">Lots per leg</label><input name="lots_per_leg" type="number" min="1" step="1" value="${cfg.lots_per_leg}" class="field-input" />
+        </div>
+        <div id="capitalSizingField" class="${cfg.sizing_mode === "capital" ? "" : "hidden"}">
+          <label class="field-label">Capital per leg (₹)</label><input name="capital_per_leg" type="number" min="1" step="any" value="${cfg.capital_per_leg || ""}" class="field-input" />
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <fieldset class="border border-slate-200 rounded-xl p-4">
+        <legend class="px-2 text-sm font-medium adv-accent-text-700">Stop loss (both legs)</legend>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="col-span-2"><label class="field-label">Offset unit</label>
+            <select name="stop_offset_mode" class="js-enhance-select field-input">
+              <option value="percent" ${cfg.stop.offset_mode === "percent" ? "selected" : ""}>Percent (%)</option>
+              <option value="points" ${cfg.stop.offset_mode === "points" ? "selected" : ""}>Points</option>
+            </select>
+          </div>
+          <div><label class="field-label">Trigger offset</label><input name="stop_trig_offset" type="number" step="any" value="${cfg.stop.trig_offset}" class="field-input" /></div>
+          <div><label class="field-label">Limit buffer</label><input name="stop_limit_offset" type="number" step="any" value="${cfg.stop.limit_offset}" class="field-input" /></div>
+        </div>
+        <label class="flex items-center gap-2 text-sm mt-3 text-slate-700"><input type="checkbox" name="stop_trailing_enabled" ${cfg.stop.trailing.enabled ? "checked" : ""} class="w-4 h-4" /> Enable trailing</label>
+        <div class="grid grid-cols-2 gap-3 mt-2">
+          <div><label class="field-label">Trail by</label><input name="stop_trail_by" type="number" step="any" value="${cfg.stop.trailing.trail_by}" class="field-input" /></div>
+          <div><label class="field-label">Activation offset</label><input name="stop_activation_offset" type="number" step="any" value="${cfg.stop.trailing.activation_offset}" class="field-input" /></div>
+        </div>
+      </fieldset>
+
+      <fieldset class="border border-slate-200 rounded-xl p-4">
+        <legend class="px-2 text-sm font-medium adv-accent-text-700">Target (both legs)</legend>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="col-span-2"><label class="field-label">Offset unit</label>
+            <select name="target_offset_mode" class="js-enhance-select field-input">
+              <option value="percent" ${cfg.target.offset_mode === "percent" ? "selected" : ""}>Percent (%)</option>
+              <option value="points" ${cfg.target.offset_mode === "points" ? "selected" : ""}>Points</option>
+            </select>
+          </div>
+          <div><label class="field-label">Trigger offset</label><input name="target_trig_offset" type="number" step="any" value="${cfg.target.trig_offset}" class="field-input" /></div>
+          <div><label class="field-label">Limit buffer</label><input name="target_limit_offset" type="number" step="any" value="${cfg.target.limit_offset}" class="field-input" /></div>
+        </div>
+        <label class="flex items-center gap-2 text-sm mt-3 text-slate-700"><input type="checkbox" name="target_trailing_enabled" ${cfg.target.trailing.enabled ? "checked" : ""} class="w-4 h-4" /> Enable trailing</label>
+        <div class="grid grid-cols-2 gap-3 mt-2">
+          <div><label class="field-label">Trail by</label><input name="target_trail_by" type="number" step="any" value="${cfg.target.trailing.trail_by}" class="field-input" /></div>
+          <div><label class="field-label">Activation offset</label><input name="target_activation_offset" type="number" step="any" value="${cfg.target.trailing.activation_offset}" class="field-input" /></div>
+        </div>
+      </fieldset>
+    </div>
+
+    <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Each leg's own EOD safety net</legend>
+      <p class="text-xs text-slate-400 mb-3">Separate from the cutoff below, which only governs starting a NEW cycle -- this closes a leg that's still open near end of day.</p>
+      <div class="grid sm:grid-cols-3 gap-3">
+        <div><label class="field-label">Mode</label>
+          <select name="time_exit_mode" class="js-enhance-select field-input">
+            <option value="none" ${cfg.time_exit.mode === "none" ? "selected" : ""}>No scheduled close</option>
+            <option value="intraday_window" ${cfg.time_exit.mode === "intraday_window" ? "selected" : ""}>Intraday window</option>
+          </select>
+        </div>
+        <div><label class="field-label">Window start</label><input name="window_start" value="${cfg.time_exit.window_start || "15:10"}" class="field-input" /></div>
+        <div><label class="field-label">Window end</label><input name="window_end" value="${cfg.time_exit.window_end || "15:15"}" class="field-input" /></div>
+      </div>
+    </fieldset>
+
+    <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Safeguards</legend>
+      <div class="grid sm:grid-cols-3 gap-3">
+        <div><label class="field-label">Consecutive loss limit</label><input name="consecutive_loss_limit" type="number" min="1" step="1" value="${cfg.safeguards.consecutive_loss_limit}" class="field-input" /></div>
+        <div><label class="field-label">Daily loss cap (₹)</label><input name="daily_loss_amount" type="number" min="1" step="any" value="${cfg.safeguards.daily_loss_amount}" class="field-input" /></div>
+        <div><label class="field-label">Max cycles/day</label><input name="max_cycles_per_day" type="number" min="1" step="1" value="${cfg.safeguards.max_cycles_per_day}" class="field-input" /></div>
+        <div><label class="field-label">Cooldown (minutes)</label><input name="cooldown_minutes" type="number" min="0" step="1" value="${cfg.safeguards.cooldown_minutes}" class="field-input" /></div>
+      </div>
+      <p class="text-xs text-slate-400 mt-2">Once past max cycles/day, every subsequent cycle that day waits the cooldown before starting (a standing slow-down, not a one-time pause). Consecutive-loss and daily-loss caps are hard stops -- they need a manual Resume.</p>
+    </fieldset>
+
+    <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Schedule</legend>
+      <p class="text-xs text-slate-400 mb-3">WHEN this Program is even eligible to consider a new cycle -- a different question from Safeguards above (which decides whether it should STOP due to bad performance).</p>
+      <label class="flex items-center gap-2 text-sm mb-3 text-slate-700">
+        <input type="checkbox" name="schedule_continuous" id="scheduleContinuous" ${cfg.schedule.continuous ? "checked" : ""}
+          onchange="document.getElementById('scheduleWindowFields').classList.toggle('opacity-40', this.checked); document.getElementById('scheduleWindowFields').classList.toggle('pointer-events-none', this.checked);"
+          class="w-4 h-4" /> Continuous -- ignore the window below entirely, always eligible (e.g. a 24-hour Crypto Program)
+      </label>
+      <div id="scheduleWindowFields" class="grid sm:grid-cols-2 gap-3 ${cfg.schedule.continuous ? "opacity-40 pointer-events-none" : ""}">
+        <div><label class="field-label">Start time (HH:MM)</label><input name="schedule_start_time" value="${cfg.schedule.start_time}" class="field-input" /></div>
+        <div><label class="field-label">End time (HH:MM)</label><input name="schedule_end_time" value="${cfg.schedule.end_time}" class="field-input" /></div>
+        <div>
+          <label class="field-label">Days</label>
+          <select name="schedule_days" class="js-enhance-select field-input">
+            <option value="all" ${cfg.schedule.days === "all" ? "selected" : ""}>All days</option>
+            <option value="expiry_day" ${cfg.schedule.days === "expiry_day" ? "selected" : ""}>Expiry day only</option>
+          </select>
+        </div>
+        <div><label class="field-label">Inter-cycle delay (seconds)</label><input name="schedule_inter_cycle_delay_seconds" type="number" min="0" step="1" value="${cfg.schedule.inter_cycle_delay_seconds}" class="field-input" /></div>
+      </div>
+      <p class="text-xs text-slate-400 mt-2">Inter-cycle delay: how long to wait after a cycle closes before considering a new one. 0 = immediate re-entry.</p>
+    </fieldset>
+
+    <div class="flex gap-3">
+      <button type="button" onclick="submitProgramForm()" class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium adv-accent-bg-600 text-white shadow-sm">
+        ${editingProgramId ? "Save changes" : "Create Program"}
+      </button>
+      <button type="button" onclick="closeProgramDialog()" class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+        Close
+      </button>
+    </div>
+  </form>`;
+}
+
+function showNewProgramDialog() {
+  editingProgramId = null;
+  document.getElementById("programDialogTitle").textContent = "New Program";
+  document.getElementById("programDialogSaveBtn").classList.remove("hidden");
+  document.getElementById("programDialogBody").innerHTML = programFormHtml(null);
+  enhanceAllSelects(document.getElementById("programDialogBody"));
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+function editProgram(id) {
+  const p = allPrograms.find((x) => x.config.program_id === id);
+  if (!p) return;
+  editingProgramId = id;
+  document.getElementById("programDialogTitle").textContent = `Edit: ${p.config.name}`;
+  document.getElementById("programDialogSaveBtn").classList.remove("hidden");
+  document.getElementById("programDialogBody").innerHTML = programFormHtml(p);
+  enhanceAllSelects(document.getElementById("programDialogBody"));
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+async function submitProgramForm() {
+  const form = document.getElementById("programForm");
+  const fd = new FormData(form);
+  const payload = {
+    name: fd.get("name"),
+    index_id: fd.get("index_id"),
+    risk_group_id: fd.get("risk_group_id") || null,
+    product: fd.get("product"),
+    mode: fd.get("mode") || "live",
+    lots_per_leg: num(fd.get("lots_per_leg")) || 1,
+    sizing_mode: fd.get("sizing_mode") || "lots",
+    capital_per_leg: num(fd.get("capital_per_leg")),
+    min_working_days_to_expiry: num(fd.get("min_working_days_to_expiry")) ?? 2,
+    stop: {
+      offset_mode: fd.get("stop_offset_mode"),
+      trig_offset: num(fd.get("stop_trig_offset")) || 0,
+      limit_offset: num(fd.get("stop_limit_offset")) || 0,
+      trailing: {
+        enabled: fd.get("stop_trailing_enabled") === "on",
+        trail_by: num(fd.get("stop_trail_by")) || 0,
+        activation_offset: num(fd.get("stop_activation_offset")) || 0,
+      },
+    },
+    target: {
+      offset_mode: fd.get("target_offset_mode"),
+      trig_offset: num(fd.get("target_trig_offset")) || 0,
+      limit_offset: num(fd.get("target_limit_offset")) || 0,
+      trailing: {
+        enabled: fd.get("target_trailing_enabled") === "on",
+        trail_by: num(fd.get("target_trail_by")) || 0,
+        activation_offset: num(fd.get("target_activation_offset")) || 0,
+      },
+    },
+    time_exit: {
+      mode: fd.get("time_exit_mode"),
+      window_start: fd.get("window_start") || null,
+      window_end: fd.get("window_end") || null,
+      at: null,
+    },
+    safeguards: {
+      consecutive_loss_limit: num(fd.get("consecutive_loss_limit")) || 3,
+      daily_loss_amount: num(fd.get("daily_loss_amount")) || 5000,
+      max_cycles_per_day: num(fd.get("max_cycles_per_day")) || 5,
+      cooldown_minutes: num(fd.get("cooldown_minutes")) ?? 5,
+    },
+    schedule: {
+      continuous: fd.get("schedule_continuous") === "on",
+      start_time: fd.get("schedule_start_time") || "09:15",
+      end_time: fd.get("schedule_end_time") || "14:55",
+      days: fd.get("schedule_days") || "all",
+      inter_cycle_delay_seconds: num(fd.get("schedule_inter_cycle_delay_seconds")) ?? 0,
+    },
+  };
+  try {
+    if (editingProgramId) {
+      await api(`/api/programs/${editingProgramId}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Program updated.");
+    } else {
+      await api("/api/programs", { method: "POST", body: JSON.stringify(payload) });
+      toast("Program created.");
+    }
+    closeProgramDialog();
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to save: " + e.message, "error");
+  }
+}
+
+// Portfolio-wide safeguards moved to the Admin page (own tab there) --
+// see admin.js's loadPortfolioSafeguardsForm/savePortfolioSafeguards.
+// This is a genuine app-level setting spanning all Programs, which fits
+// Admin's role better than sitting inside the Risk Groups tab here.
+
+
+// -------------------------------------------------------------- risk groups
+//
+// Reuses the SAME programDialogRoot/programDialogTitle/programDialogBody as
+// the Program create/edit dialog above -- only one dialog is ever open at a
+// time, so there's no need for a second, near-identical set of dialog
+// markup just for this.
+
+function riskGroupFormHtml(g) {
+  const name = g ? g.name : "";
+  const override = g && g.daily_loss_amount_override !== null && g.daily_loss_amount_override !== undefined
+    ? g.daily_loss_amount_override
+    : "";
+  return `
+  <form id="riskGroupForm" class="flex flex-col gap-4">
+    <div><label class="field-label">Risk Group name</label><input name="name" required value="${name}" placeholder="e.g. Stock F&amp;O" class="field-input" /></div>
+    <div><label class="field-label">Daily loss cap override (₹) -- blank = sum of member Programs' own caps</label><input name="daily_loss_amount_override" type="number" step="any" min="1" value="${override}" class="field-input" /></div>
+    <div class="flex gap-3">
+      <button type="button" onclick="submitRiskGroupForm()" class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium adv-accent-bg-600 text-white shadow-sm">
+        ${g ? "Save changes" : "Create Risk Group"}
+      </button>
+      <button type="button" onclick="closeProgramDialog()" class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">
+        Close
+      </button>
+    </div>
+  </form>`;
+}
+
+function showNewRiskGroupDialog() {
+  editingRiskGroupId = null;
+  document.getElementById("programDialogTitle").textContent = "New Risk Group";
+  document.getElementById("programDialogSaveBtn").classList.remove("hidden");
+  document.getElementById("programDialogBody").innerHTML = riskGroupFormHtml(null);
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+function editRiskGroup(id) {
+  const g = allRiskGroups.find((x) => x.risk_group_id === id);
+  if (!g) return;
+  editingRiskGroupId = id;
+  document.getElementById("programDialogTitle").textContent = `Edit Risk Group: ${g.name}`;
+  document.getElementById("programDialogSaveBtn").classList.remove("hidden");
+  document.getElementById("programDialogBody").innerHTML = riskGroupFormHtml(g);
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+async function submitRiskGroupForm() {
+  const form = document.getElementById("riskGroupForm");
+  const fd = new FormData(form);
+  const override = fd.get("daily_loss_amount_override");
+  const payload = {
+    name: fd.get("name"),
+    daily_loss_amount_override: override === "" ? null : Number(override),
+  };
+  try {
+    if (editingRiskGroupId) {
+      await api(`/api/risk-groups/${editingRiskGroupId}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Risk Group updated.");
+    } else {
+      await api("/api/risk-groups", { method: "POST", body: JSON.stringify(payload) });
+      toast("Risk Group created.");
+    }
+    closeProgramDialog();
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to save: " + e.message, "error");
+  }
+}
+
+async function deleteRiskGroup(id) {
+  if (!confirm("Delete this Risk Group? Only possible if no Programs currently belong to it.")) return;
+  try {
+    await api(`/api/risk-groups/${id}`, { method: "DELETE" });
+    toast("Risk Group deleted.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to delete: " + e.message, "error");
+  }
+}
+
+// ------------------------------------------------------------ cycle history
+//
+// Deliberately on-demand, not always-visible -- fetches fresh orders each
+// time rather than relying on a stale cache, same pattern as
+// showTradeDetails(). Reuses the SAME programDialogRoot as the
+// Program/Risk Group forms above (only one of these is ever open at once).
+
+async function showProgramCycles(programId) {
+  const program = allPrograms.find((p) => p.config.program_id === programId);
+  if (!program) return;
+
+  let allOrders;
+  try {
+    allOrders = await api("/api/orders");
+  } catch (e) {
+    toast("Couldn't load orders: " + e.message, "error");
+    return;
+  }
+
+  const ordersByCycleId = {};
+  for (const o of allOrders) {
+    if (o.program_id !== programId) continue;
+    (ordersByCycleId[o.cycle_id] = ordersByCycleId[o.cycle_id] || []).push(o);
+  }
+
+  const rt = program.runtime;
+  const cycles = (program.cycles || []).slice().reverse(); // most recent first
+
+  let activeSectionHtml = "";
+  if (rt.active_cycle_id) {
+    const activeOrders = ordersByCycleId[rt.active_cycle_id] || [];
+    activeSectionHtml = `
+      <div class="border adv-accent-border-200 adv-accent-bg-50 rounded-[0.3rem] p-3 mb-3">
+        <div class="text-xs font-medium adv-accent-text-700 mb-2">Current cycle (in progress)</div>
+        ${activeOrders.map(cycleOrderLineHtml).join("")}
+      </div>`;
+  }
+
+  const historyHtml = cycles.length
+    ? cycles.map((c) => {
+        const orders = ordersByCycleId[c.cycle_id] || [];
+        const pnlCls = c.pnl >= 0 ? "text-green-600" : "text-red-600";
+        return `
+          <div class="border border-slate-200 rounded-[0.3rem] p-3 mb-2">
+            <div class="flex items-center justify-between mb-1">
+              <div class="text-sm font-medium text-slate-900">Cycle #${c.cycle_number}</div>
+              <div class="text-sm font-semibold ${pnlCls}">${signed(c.pnl)}${c.pnl_unknown ? " *" : ""}</div>
+            </div>
+            <div class="text-[11px] text-slate-400 mb-2">${(c.started_at || "").replace("T", " ")} → ${(c.closed_at || "").replace("T", " ")}${c.pnl_unknown ? " · * at least one leg's P&L was unknown" : ""}</div>
+            ${orders.map(cycleOrderLineHtml).join("")}
+          </div>`;
+      }).join("")
+    : `<div class="text-center text-slate-400 py-8 text-sm">No closed cycles yet.</div>`;
+
+  document.getElementById("programDialogTitle").textContent = `Cycles: ${program.config.name}`;
+  document.getElementById("programDialogSaveBtn").classList.add("hidden"); // read-only view, nothing to save
+  document.getElementById("programDialogBody").innerHTML = `${activeSectionHtml}${historyHtml}`;
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+function cycleOrderLineHtml(o) {
+  const pnl = o.pnl && o.pnl.realized;
+  const pnlText = typeof pnl === "number" ? signed(pnl) : (o.status === "closed" ? "unknown" : STATUS_LABEL[o.status] || o.status);
+  const pnlCls = typeof pnl === "number" ? pnlColorClass(pnl) : "text-slate-400";
+  return `
+    <div class="flex items-center justify-between py-1.5 border-t border-slate-100 first:border-t-0 text-xs">
+      <div class="text-slate-700">${o.program_leg || "?"} — ${o.sym_id}</div>
+      <div class="flex items-center gap-2">
+        <span class="${pnlCls} font-medium">${pnlText}</span>
+        <button type="button" onclick="closeProgramDialog(); showTradeDetails('${o.order_id}', false)" class="adv-accent-text-600 hover:underline">View →</button>
+      </div>
+    </div>`;
+}
+
+// Called from an order's Info panel (app.js's showTradeDetails) for a
+// Program-tagged order -- switches to Advanced OMS and opens that
+// Program's cycle history. Explicitly awaits a fresh load rather than
+// assuming allPrograms is already populated, since this can be triggered
+// before the person has ever visited the Advanced OMS tab this session.
+async function jumpToProgramCycle(programId) {
+  _closeModal();
+  switchSection("advanced");
+  await loadAdvancedOms();
+  showProgramCycles(programId);
+}
+
+// ----------------------------------------------------------- Orders view
+
+async function showProgramOrders(programId) {
+  const program = allPrograms.find((p) => p.config.program_id === programId);
+  if (!program) return;
+  let allOrders;
+  try {
+    const [active, archived] = await Promise.all([api("/api/orders"), api("/api/orders-archived")]);
+    archived.forEach((o) => (o.__archived = true));
+    allOrders = active.concat(archived).filter((o) => o.program_id === programId);
+  } catch (e) {
+    toast("Couldn't load orders: " + e.message, "error");
+    return;
+  }
+  document.getElementById("programDialogTitle").textContent = `Orders: ${program.config.name}`;
+  document.getElementById("programDialogSaveBtn").classList.add("hidden"); // read-only view, nothing to save
+  document.getElementById("programDialogBody").innerHTML = allOrders.length
+    ? `<div class="flex flex-col gap-3">${allOrders
+        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
+        .map((o) => renderOrderCard(o, { editable: false, isArchived: !!o.__archived }))
+        .join("")}</div>`
+    : `<div class="text-center text-slate-400 py-8 text-sm">No orders for this Program yet.</div>`;
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+// -------------------------------------------------------------- multi-select
+
+let selectedProgramIds = new Set();
+
+function onProgramCheckboxChange(el) {
+  const id = el.dataset.programId;
+  if (el.checked) selectedProgramIds.add(id);
+  else selectedProgramIds.delete(id);
+  updateProgramBulkBar();
+}
+
+function toggleSelectAllPrograms(checkbox) {
+  document.querySelectorAll(".program-checkbox").forEach((el) => {
+    el.checked = checkbox.checked;
+    onProgramCheckboxChange(el);
+  });
+}
+
+function updateProgramBulkBar() {
+  const countEl = document.getElementById("selectedProgramCount");
+  const btn = document.getElementById("archiveSelectedProgramsBtn");
+  if (countEl) countEl.textContent = selectedProgramIds.size;
+  if (btn) btn.disabled = selectedProgramIds.size === 0;
+}
+
+async function archiveSelectedPrograms() {
+  if (!selectedProgramIds.size) return;
+  if (!confirm(`Archive ${selectedProgramIds.size} selected Program(s)? Each will never start a new cycle until unarchived; any cycle currently open keeps running normally to close.`)) return;
+  const ids = [...selectedProgramIds];
+  let failCount = 0;
+  for (const id of ids) {
+    try {
+      await api(`/api/programs/${id}/archive`, { method: "POST" });
+    } catch (e) {
+      failCount++;
+    }
+  }
+  selectedProgramIds.clear();
+  toast(failCount ? `Archived ${ids.length - failCount}, ${failCount} failed.` : `Archived ${ids.length} Program(s).`, failCount ? "error" : "ok");
+  loadAdvancedOms();
+}
+
+// Called from the dialog header's top "Save" icon button -- this dialog
+// is reused for the Program form, the Risk Group form, AND read-only
+// views (Cycles, Orders), so this tries whichever form actually exists
+// right now and is a harmless no-op when neither does (i.e. a read-only
+// view is showing).
+function submitCurrentProgramDialogForm() {
+  // Deliberately calls the submit FUNCTIONS directly (same as the bottom
+  // Save button's onclick) rather than form.requestSubmit() -- neither
+  // programForm nor riskGroupForm has a "submit" event listener
+  // (unlike order.js/strategies.js's forms, which do, and call
+  // preventDefault() inside it), so requestSubmit() here would trigger
+  // the browser's own native, unhandled form submission -- a real GET
+  // request navigating away from the app entirely, landing back at "/".
+  // That was the literal cause of "the tick icon takes me to the
+  // homepage." Calling the function directly never goes anywhere near
+  // that native submission path at all.
+  if (document.getElementById("programForm")) {
+    submitProgramForm();
+  } else if (document.getElementById("riskGroupForm")) {
+    submitRiskGroupForm();
+  }
+}
+
+// ------------------------------------------------------------ clone program
+
+function cloneProgram(id) {
+  const p = allPrograms.find((x) => x.config.program_id === id);
+  if (!p) return;
+  editingProgramId = null; // creating a NEW program -- submitting this form must NOT overwrite the original
+  const clonedConfig = { ...p.config, name: `Copy of ${p.config.name}` };
+  delete clonedConfig.program_id; // this is a NEW entity -- must not carry the original's id forward
+  document.getElementById("programDialogTitle").textContent = `Clone: ${p.config.name}`;
+  document.getElementById("programDialogSaveBtn").classList.remove("hidden");
+  document.getElementById("programDialogBody").innerHTML = programFormHtml({ config: clonedConfig });
+  enhanceAllSelects(document.getElementById("programDialogBody"));
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
+}
+
+// ------------------------------------------------------- live card refresh
+//
+// Registered on the SAME shared websocket connection Regular OMS already
+// uses (see app.js's onOrdersUpdate) -- Program cards used to have NO
+// live-refresh mechanism at all: they only ever updated on navigating to
+// Advanced OMS or after an explicit action, so a card watched continuously
+// would go stale and just sit there. This targets ONLY each active-legs
+// container (a stable, dedicated id per Program), leaving the rest of the
+// card -- checkboxes, buttons, everything else -- untouched, so a
+// selection mid-bulk-archive isn't wiped out by a push landing at the
+// wrong moment. Program-level runtime state (status, cycles_today,
+// daily_realized_pnl) isn't in this push at all -- see
+// _periodicProgramRefreshLoop below for that.
+onOrdersUpdate((orders) => {
+  const section = document.getElementById("section-advanced");
+  if (!section || section.classList.contains("hidden")) return;
+  if (!allPrograms.length) return;
+
+  for (const p of allPrograms) {
+    const el = document.getElementById(`active-legs-${p.config.program_id}`);
+    if (!el) continue; // this Program isn't currently rendered (e.g. archived tab is showing instead)
+    const rt = p.runtime;
+    const activeLegs = rt.active_cycle_id ? orders.filter((o) => o.cycle_id === rt.active_cycle_id) : [];
+    el.innerHTML = activeLegsInnerHtml(activeLegs);
+  }
+});
+
+// Safety net for the Program-level state the live push above can't cover
+// (status, cycles_today, daily_realized_pnl, consecutive_losses -- none
+// of that lives on an order) -- a full reload every 20s, only while
+// Advanced OMS is actually the visible section, so nothing sits stale
+// for more than a few seconds even without an explicit action.
+setInterval(() => {
+  const section = document.getElementById("section-advanced");
+  if (section && !section.classList.contains("hidden")) loadAdvancedOms();
+}, 20000);

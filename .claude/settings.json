@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Edit(./secrets/**)"
+    ],
+    "ask": [
+      "Bash(python backend/main.py*)",
+      "Bash(python3 backend/main.py*)",
+      "Bash(uvicorn*)",
+      "Bash(git push *)"
+    ]
+  }
+}

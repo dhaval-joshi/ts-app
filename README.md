@@ -1,0 +1,1311 @@
+# Tradejini Trading Station
+
+A small, self-hosted app that places an order, waits for it to fill, protects
+it with a stop-loss + target, trails those if you ask it to, and closes
+it on a schedule you set. Built to be readable end-to-end, not "clever."
+
+It does **not** browse market data, symbols, or charts. You bring the exact
+`symId` (and, only if you want trailing, the streaming symbol) for each
+trade; the app's only job is managing that order through its life.
+
+---
+
+## Migrating to this version (read this first)
+
+This version adds **login**, a full **Advanced OMS** (auto-trading Programs
+with Paper/Live modes, capital-spread sizing, Risk Groups, scheduling, a
+margin pre-check), a **Portfolio** landing view, and an **Admin** section
+(accent color, a filterable Failures browser) on top of everything before it.
+It's a large jump from the last version -- here's exactly what to do.
+
+1. **Stop the old app first**, same as always -- never run two processes
+   against the same `data/` folder at once.
+2. **Set app login credentials before starting.** This version genuinely
+   refuses to start at all without them (see "Login" below for why). Add to
+   your `.env`:
+   ```
+   APP_LOGIN_USERNAME=<pick a username>
+   APP_LOGIN_PASSWORD=<pick a password>
+   SESSION_TTL_DAYS=7
+   ```
+   This is a login for the app itself, unrelated to your Tradejini
+   credentials -- plain text, single shared login, no user accounts,
+   deliberately simple for a single-operator local app.
+3. **Copy everything from your old `data/` folder over, including
+   `data/programs/`** if you have any saved Programs from earlier testing.
+   Every new field this version adds (Risk Group, Schedule, Mode, capital
+   sizing, the `archived` flag) is backfilled automatically with sensible
+   defaults the first time an old Program loads -- nothing to migrate by
+   hand, and nothing gets silently dropped. Existing Programs come back as
+   `mode: "live"`, `sizing_mode: "lots"` (i.e. exactly how they already
+   behaved), unarchived, with a Risk Group auto-created per underlying if
+   they didn't have one yet.
+4. **If you're using Advanced OMS, add `data/market_holidays.json`** (a
+   JSON array of `"YYYY-MM-DD"` strings) if you haven't already -- see the
+   Advanced OMS section below for what it's for.
+5. **Hard-refresh your browser** (`Ctrl+F5`) on first load -- a large
+   amount of frontend structure changed (New Order and Strategies both
+   moved from standalone pages into the main app shell; old bookmarks to
+   `/order`, `/strategy`, `/calendar`, `/archive` all still work and
+   redirect to the right place, but a stale cached script could cause
+   confusing errors otherwise).
+6. **First login**: visit the app, you'll land on `/login` automatically.
+   After signing in you'll see the new **Portfolio** landing view (combined
+   KPIs + a combined Calendar) -- Regular OMS and Advanced OMS are now nav
+   links instead of tabs on the dashboard.
+7. **Nothing about how existing Programs trade changes on upgrade.** A
+   Program that was already running keeps running exactly as before --
+   `mode: "live"` and `sizing_mode: "lots"` are the defaults specifically so
+   upgrading never silently changes a Program's real-money behavior. Paper
+   mode and capital sizing are both opt-in per Program from here on.
+8. **Existing Strategy files just work, no manual renaming needed** -- a
+   Strategy file saved before the strategy-id system existed gets one
+   backfilled automatically from its own filename the moment it's loaded,
+   so editing or renaming it afterward correctly updates that same file in
+   place rather than creating a stray duplicate.
+9. **This version needs internet access to look right**, and has since the
+   theme moved to Tailwind CSS -- fonts/icons/Tailwind itself all load from
+   a CDN on every page load. If you're ever on a machine with restricted/no
+   internet access, the core trading logic still runs fine, but the page
+   will render completely unstyled until connectivity is available again.
+
+---
+
+## 1. How it works (read this before the setup steps)
+
+Strategies and orders are deliberately separate things:
+
+- A **strategy** (`/strategy` page) is a reusable, symbol-agnostic template:
+  entry order type, stop-loss and target expressed as an *offset* from
+  wherever you enter (in points or percent), trailing rules, and a
+  time-based close rule. It knows nothing about which instrument or how
+  much.
+- An **order** (`/order` page) is one specific trade: symbol, side,
+  quantity, which strategy to apply, and (only if that strategy's entry
+  type needs one) the actual entry price/trigger.
+
+```
+ you (Strategies page)              you (New Order page)
+        │  POST /api/strategies            │  POST /api/orders {strategy_name, sym_id, qty, side, ...}
+        ▼                                   ▼
+ data/strategies/<name>.json    ┌─────────────────────────────────────────────────────────────┐
+        ▲ loaded by ────────────┤ OrderManager (backend/order_manager.py)                       │
+                                 │                                                                │
+                                 │  1. place entry order            → Tradejini REST              │
+                                 │  2. poll GET /api/oms/orders      every 5s, notice fill         │
+                                 │     (a websocket "something changed" event just wakes this      │
+                                 │      poll up sooner -- the REST response is the source of        │
+                                 │      truth, since the event payload fields aren't fully          │
+                                 │      documented)                                                 │
+                                 │  3. once filled → convert the strategy's SL/Target OFFSETS       │
+                                 │     into concrete prices anchored to the fill price, then         │
+                                 │     start WATCHING live ticks -- no broker order is placed        │
+                                 │     for the exit at all                                            │
+                                 │  4. on every live L1 tick for that order's stream symbol:          │
+                                 │     ratchet the trigger price if trailing is on for a leg,         │
+                                 │     then check if price has crossed the current trigger            │
+                                 │  5. trigger crossed (or a time-based exit is due) → fire a         │
+                                 │     plain market order for whatever's still open                   │
+                                 │  6. every state change is written to data/orders/<id>.json         │
+                                 │     immediately, so a crash mid-trade is recoverable                │
+                                 └─────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+                                 data/orders/*.json   (one file per order = your trade history + state)
+```
+
+On startup the app reads every file in `data/orders/`, finds anything not in
+a terminal state (`closed` / `cancelled` / `entry_rejected`), and resumes
+managing it -- re-subscribing to live prices if it was trailing, and
+re-arming its time-based exit check. That's the whole crash-recovery story.
+Editing or deleting a strategy later never touches orders already placed
+with it -- each order keeps its own resolved SL/Target/trailing state from
+the moment it filled.
+
+### Why offsets (points/%) instead of fixed prices in a strategy
+
+A strategy is meant to be reused across symbols and days, where absolute
+price levels are meaningless (a stop at "2400" makes sense on one stock and
+is nonsense on another). So a strategy stores *how far* the stop/target sit
+from wherever you actually enter -- "1% below entry" or "15 points below
+entry" -- and the app resolves that into a real price the moment your entry
+order fills, using the real fill price. From that point on, everything
+(including trailing) operates on concrete prices.
+
+### Exit mechanism: app-watched market order -- the ONLY mechanism now, OCO fully retired
+
+Every exit -- Regular OMS orders and every Advanced OMS Program leg --
+closes exclusively via a plain market order this app fires itself, the
+instant live price crosses the stop or target trigger. **No conditional
+order (OCO, a standalone stop order, a standalone target order) is ever
+placed at the broker for a new position, full stop.** This is hardcoded
+and unconditional in `order_manager.py`, not a per-Strategy/per-Program
+choice -- there used to be one, and it's been removed entirely (see
+"Historical" just below for why).
+
+`exit_mode` (Both / Stop-loss only / Target only / Neither, chosen per
+trade) still exists and still means the same thing it always did -- WHICH
+leg(s) get watched and protected. What's gone is any notion of *how*:
+every exit_mode now resolves the exact same way, a plain market order
+fired by this app when the relevant trigger crosses, never a broker-side
+conditional order of any kind.
+
+**This requires the app to be running continuously, with the
+instrument's stream symbol set, for the entire lifetime of every open
+position.** Nothing watches the price -- and nothing protects an open
+position -- if either isn't true. See the server-down warning
+(Section 4) and keeping this app running reliably (a supervised/
+auto-restarting process, not just a terminal window you might close) is
+a real operational requirement.
+
+The old broker-OCO code path (placement, trailing-modify, reconciliation
+-- everything specific to that retired mechanism) has since been removed
+from the codebase entirely, not just deprecated. There's no backward-
+compatibility concern to weigh against that: this app was still in
+active development when OCO was retired, with no live positions
+depending on the old code path by the time it was removed.
+
+### Historical: why OCO was tried first, and why it was retired
+
+This app originally placed a real OCO order at the broker for every
+exit, and this section used to be a live troubleshooting guide for it.
+It's kept, condensed, because the underlying facts are still real and
+still instructive -- but nothing below describes current behavior; OCO
+is fully gone from the exit path (see above).
+
+**Two confirmed, root-caused bugs in Tradejini's own OCO endpoints**, found
+by testing directly against the live API, not just inferred:
+- `stopLossProduct`/`targetProduct` only actually accept `"delivery"` or
+  `"normal"` in Tradejini's real schema -- never `"intraday"`, despite
+  their own docs claiming it's supported. Passing an intraday order's
+  product straight through made every trailing modify on an intraday
+  order fail outright.
+- `modify-order/oco` rejected a quantity sent as a decimal (e.g.
+  `"65.0"`) with *"Bad request"*, while accepting the identical value as
+  a plain integer (`"65"`) -- `place-order/oco` tolerated the decimal
+  form fine. Modify was measurably stricter about request shape than
+  place, for no documented reason.
+
+Beyond those two, Tradejini's OCO modify endpoint was also observed
+rejecting requests for reasons that never reduced to a clean root cause
+(an intermittent margin-shortfall-style rejection was one confirmed
+example, independent of anything this app sent).
+
+**The failure mode that ultimately mattered most**: when an OCO's stop
+or target leg filled, Tradejini's own order-status endpoint didn't
+reliably reflect it -- in practice, a position could close at the broker
+while this app's dashboard kept showing it as open, even after a manual
+refresh, because the OCO's own order id sometimes never surfaced a
+"completed" status at all. A meaningful amount of engineering effort
+(documented in earlier revisions of this README, if you need the detail)
+went into a multi-tier detection fallback (position-flat checks, trade
+records, last-known-tick estimates) to work around this -- and it still
+wasn't fully reliable. Real capital was lost to this before it was fully
+understood, which is the actual reason OCO was retired outright rather
+than patched further: the fix wasn't "detect the failure better," it was
+"stop depending on a mechanism this unreliable at all."
+
+### Trailing and exit checks are now local-only -- no broker calls at all
+
+Trailing recalculates the stop/target trigger price on every live tick,
+purely in this app's own memory, and persists the updated value to
+`data/orders/<id>.json` -- there's no broker API call involved anymore
+(no modify-order, nothing to fail, nothing to retry, nothing to
+rate-limit). The moment price crosses the current trigger, the app fires
+the same reliable plain-market-order close used everywhere else in this
+app (Stop & Flatten, manual close, time-based exits).
+
+If that market order itself gets rejected, or gets accepted but never
+resolves to a confirmed fill within a reasonable time (most commonly:
+placed at or after market close, accepted by the broker but never
+settling within the session) -- the app automatically reverts the order
+to its watched state, tries again the next time a live tick arrives, and
+raises a persistent, visible warning banner on the order's card the
+entire time it's unresolved, with the broker's own error/reason and how
+long it's been going on. It clears automatically once the position
+actually closes.
+
+### Live and realized P&L
+
+Any order with a stream symbol gets live prices while it's being watched
+(`watching` status) -- regardless of whether trailing is on, since P&L
+tracking needs the same ticks trailing does. The dashboard shows:
+
+- **Live price and live P&L** while a position is open: `(current price −
+  entry avg) × qty`, in your favour or against, updated as ticks arrive.
+  This is held in memory only (not written to disk on every tick -- there's
+  no need to, and it would be a lot of needless disk I/O), so it reappears
+  within a couple of seconds after a restart once ticks resume, rather than
+  surviving a crash moment-to-moment. That's fine since it's a live
+  indicator, not a record. Note: once an order enters `closing` status,
+  its P&L stops updating live at all (ticks are only fed to
+  still-`watching` orders) -- what's shown for a closing order is a frozen
+  snapshot from the instant the close fired, not a continuing figure.
+- **Realized P&L** once a position closes: `(exit avg − entry avg) × qty`,
+  computed from the broker's own square-off fill price -- not from ticks,
+  so this is accurate and permanent even for orders with no stream symbol
+  at all.
+- **Day P&L and Overall P&L** at the top of the dashboard: Day = P&L from
+  positions closed *today* + live P&L of everything currently open. Overall
+  = P&L from *every* closed position, ever, + live P&L of everything
+  currently open. Both are computed in the browser from what `/api/orders`
+  already returns -- there's no separate ledger or database. If some open
+  positions don't have a live price (no stream symbol, or an exchange
+  mismatch -- see above), the summary line tells you how many of your open
+  positions are actually contributing a live number right now.
+
+Neither figure accounts for brokerage, taxes, or other charges -- it's raw
+price P&L only.
+
+### Why "trailing target" needs L1 ticks, but nothing else does
+
+You explicitly asked for trailing SL *and* trailing target. Tradejini has no
+native field for a trailing profit target, so the app has to watch price to
+move it -- there's no way around that for that one feature. Everything else
+(order status, fills, positions) is tracked via the REST order/position
+endpoints, not price data. If you never enable trailing on any order, the
+app never subscribes to a single price tick.
+
+To keep this from becoming a "market data" feature, there's no symbol
+search/lookup built in. If you want trailing or live P&L on an order, you
+supply the streaming symbol (`<excToken>_<exchangeName>`) directly in the
+order form. Leave it blank and the order still works exactly as configured
+-- trailing just won't move, and no live P&L will show (final/realized P&L
+still works fine either way, since that comes from the broker's own fill
+prices, not live ticks). The New Order page now warns you loudly if the
+strategy you picked trails but you left the stream symbol blank.
+
+**Getting the exchange part of the stream symbol right matters.** It is
+*not* always `NSE` -- it's whichever exchange segment the instrument
+actually trades on, and for anything other than plain NSE equity that's a
+different code:
+
+| Segment | Exchange code |
+|---|---|
+| NSE equity (cash) | `NSE` |
+| NSE F&O (futures & options) | `NFO` |
+| BSE equity (cash) | `BSE` |
+| BSE F&O | `BFO` |
+| MCX commodities | `MCX` |
+| Currency derivatives | `CDS` |
+
+The good news: you don't need to look this up separately -- it's usually
+already embedded in the `symId` you're using for the order itself. For
+example `OPTSTK_INDIANB_NFO_2026-08-25_880_PE` has `NFO` right there as the
+third underscore-separated segment -- that's the exchange code your stream
+symbol needs, e.g. `52094_NFO`, not `52094_NSE`. Get this wrong and nothing
+breaks loudly -- the app just never receives a single tick for that order,
+so trailing silently never moves and live P&L never appears. The New Order
+page now flags an obvious mismatch between the two for you (a rough check,
+not a guarantee) -- but the underlying rule above is the one to trust.
+
+---
+
+## 2. Setup
+
+Requires **Python 3.10+**.
+
+```bash
+cd tradejini-trading-station
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# now edit .env:
+#   TRADEJINI_API_KEY      - from your app in the developer portal
+#   TRADEJINI_PASSWORD     - your Tradejini login password
+#   TRADEJINI_TOTP_SECRET  - the base32 secret behind your authenticator QR
+#                            code (Settings -> authenticator app setup on
+#                            cubeplus.tradejini.com). The app generates a
+#                            fresh 6-digit code from this every time it logs
+#                            in, so you never paste an OTP by hand.
+```
+
+### Troubleshooting the install
+
+This app's dependency stack is deliberately 100% pure Python — nothing here
+compiles anything, on any Python version or Windows architecture (including
+ARM64), so you should never need to install a compiler, Rust, or a second
+Python version. If `pip install -r requirements.txt` ever tries to compile
+something (you'd see `Compiling ... error: linker not found` or similar),
+it means a dependency version snuck in that isn't pure-Python — first try:
+
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+If `uvicorn` isn't recognized after installing, either the install above
+didn't actually finish (check the output for errors) or your venv isn't
+active in the current terminal (`.venv\Scripts\activate` on Windows). You
+can always sidestep PATH issues by running it as a module instead:
+
+```powershell
+python -m uvicorn backend.main:app --reload --port 8000 --ws wsproto
+```
+
+Run it:
+
+```bash
+uvicorn backend.main:app --reload --port 8000 --ws wsproto
+```
+
+Open **http://localhost:8000** for the dashboard, **http://localhost:8000/strategy**
+to build strategies, or **http://localhost:8000/order** to place a trade.
+
+**If a page (Dashboard, Archive, Calendar, etc.) loads blank** with no
+errors in the terminal, it's almost always the browser serving a cached,
+stale copy of a `.js` file after an update -- do a hard refresh
+(`Ctrl+F5` or `Ctrl+Shift+R` on Windows, `Cmd+Shift+R` on Mac) before
+looking any further. Every script tag has a `?v=<number>` cache-buster on
+it specifically to prevent this, but a browser that already had a page open
+across an update can still hang onto an old cached copy until you force it.
+If it's not that, open the browser's dev tools (F12) → Console tab, which
+will show the actual JS error.
+
+If login fails -- bad credentials, no internet, a DNS resolution error
+(`getaddrinfo failed` on Windows), or the broker being briefly down -- the
+app still starts and stays fully usable; you'll see the error in the
+terminal log and the "live feed" dot on the dashboard stays red. No restart
+needed for anything transient: it retries automatically every 30 seconds
+and picks up the moment whatever was wrong clears. For bad credentials,
+fix `.env` and either wait for the next retry or just restart.
+
+If the terminal shows `getaddrinfo failed` (or any "could not connect"
+error) specifically, double check `TRADEJINI_HOST` in `.env` is a bare
+hostname like `api.tradejini.com` -- not a full URL. Accidentally including
+`https://` there used to produce a malformed address that fails DNS
+resolution with exactly this cryptic error; the app now strips a stray
+`https://`/`http://` prefix and trailing slash automatically, but a typo'd
+hostname obviously can't be auto-corrected. The exact address it's trying to
+reach is logged on every startup/retry attempt.
+
+---
+
+## 3. Field glossary
+
+### The four strategy fields, explained simply (with worked examples)
+
+These four live on the **Strategies** page, one set for the Stop leg and
+one for the Target leg. All four examples below assume the offset unit is
+set to **percent**, since that's the default and the easiest to reason
+about -- buy 100 shares at ₹100 each.
+
+**Trigger offset from entry** -- how far the price has to move from your
+entry before that leg fires, as a % of entry price.
+- *Stop, 1%*: your stop-loss triggers if price falls to ₹99 (1% below ₹100).
+- *Target, 2%*: your target triggers if price rises to ₹102 (2% above ₹100).
+
+**Limit buffer past trigger** -- once a leg triggers, it becomes a *limit*
+order, not a market order -- this is how much further, as a %, the limit
+price sits past the trigger, as a slippage cushion so it still fills even
+if price has moved a bit more by the time the order reaches the exchange.
+`0` means the limit price equals the trigger price exactly.
+- *Stop, 1% trigger + 0.1% buffer*: triggers at ₹99, but the actual sell
+  order allows a fill down to ₹98.90 -- so it doesn't sit unfilled at
+  exactly ₹99 if price gaps slightly past it.
+- *Target, 2% trigger + 0.1% buffer*: triggers at ₹102, sell order allows
+  down to ₹101.90 -- same idea, a small cushion to actually get filled.
+
+**Trail by** -- once trailing kicks in, how far behind the current price
+that leg re-anchors itself, as a %. It only ever moves in your favour,
+never back.
+- *Stop, trail by 1%*: as price rises to ₹110, your stop keeps ratcheting
+  up to stay 1% below the current price (₹108.90) -- it never moves down
+  again even if price dips afterward.
+- *Target, trail by 2%*: as price keeps rising past your original ₹102
+  target, the target itself extends further out, staying 2% above current
+  price, letting a strong move run further before locking in the win.
+
+**Activation offset (profit)** -- how much open profit, as a %, must exist
+before trailing starts moving that leg at all. `0` means trail from the
+very first tick after entry.
+- *Stop, activation offset 0.5%*: the stop-loss sits still at its original
+  ₹99 until the position is at least 0.5% in profit (price ≥ ₹100.50) --
+  only then does it start trailing upward. Prevents small early wiggles
+  from moving your stop before the trade has proven itself.
+
+---
+
+**Entry order type / Validity** (New Order page) -- how the entry order
+itself behaves: `market` fills immediately at whatever price is available;
+`limit` only fills at your specified price or better; `stoplimit` /
+`stopmarket` sit dormant until price reaches a trigger, then fire. Validity
+(`day`/`ioc`/`eos`/`gtc`) is how long the order stays live if unfilled.
+These are chosen per-trade, not saved on the strategy -- the same strategy
+(management style) can be entered with a market order one day and a limit
+order the next.
+
+**Entry trigger price** (New Order page, only shown for `stoplimit` /
+`stopmarket` entry types) -- the price at which your entry order wakes up.
+It sits at the broker as a pending "stop" order; the moment the exchange
+price touches this trigger, the order fires. For `market` and `limit`
+entry types this doesn't apply, so it's hidden.
+
+**Entry / reference price** (New Order page) -- a single field serving two
+purposes: it drives capital-based quantity sizing (and a "capital
+utilized" preview) regardless of entry type, and if the entry type is
+`limit` or `stoplimit`, it's also sent as the actual entry limit price
+(rounded up to tick size). Fill it by hand or with **Fetch price**.
+
+**Exit legs** (New Order page) -- which leg(s) actually get watched and
+protected once the entry fills: **Both** (stop and target, whichever
+crosses first closes the position), **Stop-loss only**, **Target only**,
+or **Neither** (nothing watched; only a manual or time-based close
+applies). Defaults to Both. Every option resolves the same way -- a
+plain market order this app fires itself when the relevant trigger
+crosses (see "Exit mechanism" in Section 1).
+
+**Trigger price** (on a strategy's Stop or Target leg) -- see "Trigger
+offset from entry" above; this is the resulting absolute price once the
+offset is resolved against your actual entry fill.
+
+**Limit price** (on a strategy's Stop or Target leg) -- see "Limit buffer
+past trigger" above.
+
+**"Trailing requires a Stream symbol... will not trail"** -- trailing needs
+live price ticks, which arrive over Tradejini's *streaming* socket,
+addressed by a different identifier (`excToken_exchange`, e.g. `2885_NSE`)
+than the REST `symId` you use everywhere else. Without it on an order, the
+app has no live price to trail against for that instrument, so the SL/Target
+still get placed at their initial level from the strategy -- they just never
+move. The New Order page shows a warning banner if you pick a trailing
+strategy and leave this blank.
+
+**Market protection %** -- Tradejini rejects `market`/`stop-market` entry
+orders placed via the API unless a protection percentage is set (error:
+*"Market protection mandatory for all market order."*). It's a price collar
+-- the order can only fill within that % of the last traded price, so it
+can't execute at a wildly bad price during a fast move. Handled
+automatically now (5%, not user-configurable) whenever the entry type
+needs one -- nothing to set.
+
+**Tick size** -- the instrument's minimum price increment (`0.05` for most
+NSE equity and F&O contracts, but not universal -- check yours if it's
+unusual). Every price the app computes for you -- the initial SL/Target
+levels, and every trailing update -- gets rounded to the *nearest* multiple
+of this before being sent to the broker. Two deliberate exceptions round
+differently, both by explicit request:
+- A manually-entered **"Close @ price"** on the dashboard rounds *down*
+  (never fills worse than what you asked for).
+- A manually-entered **entry price** on the New Order page rounds *up*.
+
+Skip tick_size on a strategy and the broker rejects the order outright
+(error: *"Price X is not a multiple of tick size Y"*). Defaults to `0.05`
+if unset, including for strategies saved before this field existed.
+
+**Fetch price** (New Order page, and the Dashboard for a manual close) --
+fetches the current price for the instrument, on demand, with a single
+click. This is the one deliberate exception to "no market data" anywhere
+in this app: a single, explicit, user-triggered check for a specific
+instrument, using the same live feed trailing/P&L already rely on -- not a
+watchlist, chart, or anything you'd browse. It needs the Stream symbol
+field filled in (not just Symbol ID). Fails clearly, not silently, if the
+live feed isn't connected, the symbol looks wrong, or nothing arrives
+within about 8 seconds (e.g. market closed).
+
+---
+
+## 4. Using it
+
+**Strategies** (`/strategy`) is pure position-management templating -- no
+symbol, quantity, entry order type, or validity here (those are per-trade,
+on the New Order page). Define product, stop and target as offsets from
+entry (percent or points), trailing per leg, and a time-based close rule.
+Save it under a name. Trailing SL and trailing Target are **on by default**
+(1% and 2% respectively) when you create a new strategy -- untick the boxes
+to turn either off. A fresh strategy with product `intraday` also defaults
+its time-based close to the **15:10-15:15 window**; change or clear it if
+you don't want a scheduled close, and this default never overrides a mode
+you've deliberately set on an existing strategy you're editing. Editing a
+strategy later never changes orders already placed with it; each order
+snapshots what it needs at fill time.
+
+**New Order** (`/order`) is where you actually trade: symbol, side, entry
+order type/validity/price, sizing, which strategy to apply for
+stop/target/trailing/time-exit, and which **exit legs** to actually watch
+(Both/SL-only/Target-only/Neither -- see "Exit mechanism" in Section 1
+for how every option resolves the same way).
+
+*Getting a price*: enter the Symbol ID and Stream symbol, then click **Fetch
+price** to get the current price on demand -- this is the one deliberate
+exception to "no market data" in the whole app: a single, explicit,
+user-triggered price check for the specific instrument you're about to
+trade, using the same live feed trailing/P&L already use, not a
+watchlist/chart feature. It momentarily subscribes to that symbol's ticks,
+waits up to 8 seconds for one to arrive, then drops the subscription again.
+Fails clearly (not silently) if the feed isn't connected, the symbol looks
+wrong, or nothing arrives in time. You can also just type a price by hand
+instead of fetching one.
+
+That price (fetched or typed) feeds the **Entry / reference price** field,
+which does two things depending on context:
+
+- If the entry order type needs a limit price (`limit` or `stoplimit`),
+  it's sent as that price -- rounded **up** to the strategy's tick size,
+  per an explicit request (e.g. requesting `13.91` on a 0.05-tick
+  instrument sends `13.95`).
+- Either way, it drives quantity sizing and a capital-utilized preview:
+
+  - **By number of lots**: set a lot size (default `1`) and how many lots;
+    quantity is `lot_size × num_lots`. This is also what makes **Re-enter**
+    reproduce the exact same sizing later, not just the same total
+    quantity -- lot size is saved on the order specifically for this. If a
+    price is set, the page also shows `≈ ₹X capital utilized`.
+  - **By capital allocation**: enter capital to deploy; quantity is
+    `floor(capital ÷ (entry_price + 2))`, rounded down to a whole number of
+    lots. The `+2` is a fixed 2-point slippage buffer, so if the actual fill
+    price is a touch worse than your reference, the order still fits your
+    capital instead of getting rejected for insufficient funds/margin.
+
+The page shows a live preview of what that strategy will do (stop/target
+offsets, trailing, time-exit -- only for the leg(s) your chosen exit mode
+actually places) and reveals the entry trigger price field only if the
+entry type needs one. If a leg that's actually being placed trails but you
+haven't given a stream symbol, you'll see a warning right there before you
+submit.
+
+**Dashboard** (`/`) shows Day and Overall P&L at the top, then every order
+as a card: live price and live/realized P&L, status, entry avg price (with
+a **Copy** button next to it), live stop/target trigger (or, before fill,
+what it *will* be, e.g. `1% (on fill)`), fill qty, **Buy amount** and
+**Sell amount** (price × qty for whichever side was the entry vs. the
+exit), which strategy it's running, and a log of everything the app did to
+it. Below the P&L totals, three KPIs -- **days traded**, **days in
+profit**, **days in loss** -- computed across every closed order,
+including archived ones. If anything happened that could leave the
+position under-protected -- a trailing update rejected, an exit order
+failing to place, a square-off failing -- a red warning banner appears
+right on the card with the broker's actual error message, so you don't
+have to go digging through logs to notice. "Close position" cancels
+whatever exit order(s) are live and squares off whatever's open,
+immediately, regardless of schedule:
+
+- Leave the "Close @ price" box empty and it closes **at market**.
+- Click **Fetch price** next to the box to pull the current live price into
+  it (needs the order to have a stream symbol) -- a quick way to see where
+  the market is before deciding what to close at.
+- Enter a **% profit on entry** and click "Set price from %" to compute the
+  close price for you instead of typing an absolute number -- e.g. `5` on a
+  buy at 100 fills in `105`; on a short (sell) it correctly fills in `95`,
+  since profit on a short comes from price falling, not rising.
+- Enter a price and a line under the box shows exactly what will be sent --
+  the price **rounded down** to the instrument's tick size (e.g. requesting
+  `13.99` on a 0.05-tick instrument shows/places `13.95`) -- before you
+  click Close, so there's no surprise about what actually gets submitted.
+  It closes with a **limit order** at that (rounded) price instead of
+  market. A limit close isn't guaranteed to fill immediately, or at all, if
+  the market never reaches your price -- unlike a market close.
+
+Day/Overall P&L each also show a **%** figure next to the amount --
+P&L ÷ capital deployed across the relevant orders (today's for Day, all-time
+for Overall; an open position's entry value counts toward both, same as its
+unrealized P&L already did). It updates live over a websocket every couple
+of seconds.
+
+**Multi-select and bulk archive**: every closed/cancelled/rejected order
+card gets a checkbox (top-left); "Select all closed" picks every eligible
+one at once. "Archive selected" archives all of them in a single request,
+and reports which (if any) couldn't be archived rather than failing the
+whole batch over one.
+
+**"Re-enter"** on any order card takes you to the New Order page with
+symbol, side, stream symbol, strategy, entry type/validity, exit legs, and
+**the same lot size and number of lots** prefilled from that order (lot
+size is saved on the order specifically so this reproduces the actual
+original sizing, not just the same total quantity). If that order had an
+entry price set, it's prefilled too, but it's worth a fresh look (or a
+**Fetch price**) rather than trusting an old number, especially if time has
+passed. If the original strategy was since deleted, you'll be prompted to
+pick a new one before placing.
+
+**The info icon** ("i", bottom-right corner of any order card, on the
+Dashboard, Archive, or a Calendar day's order list) opens a details panel
+with everything about that trade in one place: entry and exit avg price,
+quantity, product/strategy, how many times the SL/Target were successfully
+trailed and how many of those attempts failed, final P&L and exactly which
+source it came from (an exact broker fill match vs. a rough estimate --
+see "Live and realized P&L" in Section 1), the current unresolved
+warning if there is one, and every timestamp. At the bottom, a **copiable
+filename** (so you can find the exact file on disk yourself) and an
+**Open JSON** link that shows the raw, complete order record.
+
+**Archive** (a tab on the Dashboard, alongside Calendar) is for tidying up
+the dashboard's order list without losing anything or affecting your
+totals. "Archive" on a closed/cancelled order
+card (or a bulk selection) moves its JSON file into `data/orders/archive/`
+-- it drops off the main dashboard's order list, but **still counts toward
+Day/Overall P&L and the KPIs there**, and still shows in the **Calendar**.
+Archiving only tidies up what you see day-to-day; it never changes what
+your numbers say. Every archived order keeps its own Info panel and a
+working **Unarchive** button to bring it back to the active list.
+
+**Calendar** (a tab on the Dashboard) is a month view of realized P&L by day, across
+both the active dashboard and the archive -- click a day to see the orders
+that closed on it, and from there straight into that order's Info panel.
+Useful for reviewing a specific day's trading, or for keeping a mental
+handle on your overall track record without archived history disappearing
+from view.
+
+### Time-based close, two ways
+
+- **Intraday window**: set `window_start` (e.g. `15:10`). The moment the
+  clock hits that time, the app closes the position at market. There's no
+  separate "hard deadline" enforcement beyond that -- pick a start time
+  early enough that a single market order clears comfortably before your
+  actual cutoff (e.g. `15:10` if your hard deadline is `15:15`).
+- **Specific date/time**: set an exact datetime; the app closes at or after
+  that moment, any product type, PnL irrelevant.
+
+---
+
+### Exit mechanism
+
+Same as Regular OMS -- every Program leg closes via the app-watched plain
+market order mechanism described in Section 1 above; no broker-side
+conditional order is ever placed. Worth knowing specifically for
+Programs: this used to be a per-Program *choice*, and that choice had a
+real, confirmed bug -- `program_manager.py`'s leg-construction code never
+actually threaded a Program's own `exit_mechanism` setting through to
+order placement, so every Program silently used the old broker-OCO
+mechanism regardless of what was configured. Rather than just fix that
+threading bug and keep the choice available, the choice itself was
+removed and app-watched is now unconditional for every new order --
+eliminating the entire bug class, not just this one instance of it.
+
+### Server-down warning
+
+A full-screen, hard-to-miss red overlay appears in any open browser tab
+if the app's status check fails 3 times in a row (~15 seconds) --
+telling you plainly that Programs, safeguards, and order management are
+not running, and any open positions have no active protection until the
+connection returns. Disappears automatically the moment the connection
+is restored, no refresh needed.
+
+**Important limitation, stated plainly**: this can only warn you if a
+browser tab with this app is already open and being watched when the
+server goes down. It cannot alert you if no tab is open, and it's not an
+email/SMS/push notification -- it's an in-tab safety net, not a
+monitoring service.
+
+## 5. What's deliberately left out
+
+Per your brief -- if a feature doesn't serve "place it, protect it, close it
+on schedule," it's not here:
+
+- No market-data browsing, charts, watchlists, or symbol search.
+- No multi-account / multi-broker support.
+- No order book depth, greeks, OHLC -- the streaming SDK supports all of
+  these, this app subscribes to none of them.
+- No database server -- JSON files are the entire persistence layer. If you
+  outgrow that later, `backend/store.py` is the only file that would need to
+  change (it's a thin, isolated read/write layer).
+
+## 6. Known simplifications (read before trading size)
+
+- **Partial fills**: the entry-fill detection currently treats a broker
+  order `status == "completed"` as "fully filled, arm the exit now." If
+  Tradejini reports partial fills differently in practice, watch the first
+  few trades closely -- this is the one piece of broker behavior that
+  couldn't be confirmed from the docs alone.
+- **Reconciliation runs every `EXIT_CHECK_INTERVAL_SECONDS` (default 5s)**,
+  so there's up to that much lag between a fill actually happening and the
+  app reacting to it (starting to watch it, noticing a close confirmed).
+  Trailing and the exit trigger check are both instant (tick-driven) --
+  this lag only affects "did the entry fill" and "did the close confirm"
+  detection.
+- **Percent offsets are computed once, at fill time, off the fill price**,
+  then held as fixed points from then on -- including for trailing. "Trail
+  by 1%" doesn't mean 1% of the constantly-changing current price; it means
+  1% of your entry price, computed once, so the trailing distance itself
+  doesn't jump around as price moves.
+- **No sandbox environment exists for this API** (per the docs) -- all
+  testing is against your live account. Start with the smallest quantity
+  the instrument allows.
+- **Market protection defaults to 5%** on any market/stop-market order (see
+  the glossary above) if a strategy doesn't specify its own. If your broker
+  segment/instrument needs a tighter or looser band, set it explicitly on
+  the strategy rather than relying on the default.
+- **Tick size defaults to 0.05** (see the glossary above) if a strategy
+  doesn't specify its own -- correct for most NSE equity/F&O, but check and
+  set it explicitly for instruments with a different tick.
+- **P&L is price-only** -- it doesn't account for brokerage, STT, or other
+  charges, and live P&L needs a stream symbol (see "Getting the exchange
+  part right" above) -- get the exchange segment wrong and it just silently
+  never appears rather than erroring.
+- **Fetch price waits up to ~8 seconds** for a tick before giving up -- if
+  the market's closed, the stream symbol's wrong, or the feed just hasn't
+  ticked that instrument recently, it'll time out rather than hang
+  indefinitely. Type a price by hand in that case. Available on both the
+  New Order page (for sizing/entry price) and the Dashboard (to help pick a
+  "Close @ price" for a manual close).
+  just what value goes out on the wire.
+- **A trailing modify that keeps failing pauses itself** after 3 consecutive
+  failures on the same order, for 60 seconds, rather than retrying every
+  tick indefinitely -- see "Trailing modify failures are now self-healing"
+  above.
+- **The dashboard's live websocket update no longer interrupts typing.**
+  Every order card gets rebuilt roughly every 2 seconds to reflect fresh
+  data -- earlier this could visibly interrupt you mid-keystroke while
+  filling in a "Close @ price" or "% profit" box (the value survived, but
+  focus and cursor position didn't, so it looked like the field kept
+  resetting). Focus and cursor position are now explicitly restored after
+  every such refresh.
+- **If a closed order's P&L still looks off**, open its **Info** panel and
+  check the "P&L source" line -- it tells you exactly which method produced
+  that number (an exact broker order/trade match vs. a rough live-tick
+  estimate vs. genuinely unknown). If it says anything other than an exact
+  match, that's the mechanism to look at first; the order's log also gets a
+  diagnostic dump of the raw trades the app saw for that symbol at the time,
+  which is the most useful thing to share if you need to report a mismatch.
+
+### Centralized failure log
+
+Every order's own `logs` array is great for "what happened to this trade,"
+useless for "how often is X actually failing across everything." Every
+operational failure -- an entry rejection, an exit order failing to place,
+a trailing modify failing, a square-off failing -- now also gets appended
+to one shared, append-only file: `data/failures.jsonl` (JSON Lines -- one
+JSON object per line, so a single bad write can't corrupt the whole file
+the way it could with one big JSON array). Each entry has a timestamp,
+category, the order it happened to, the error message, and -- where
+applicable -- the **full request and response** that were involved, so a
+recurring problem (a specific instrument always rejecting trailing, say)
+is diagnosable from the file alone. `GET /api/failures` returns the most
+recent entries if you want to pull them programmatically; there's no
+dedicated UI page for this yet (see the product proposals below).
+
+### Design system
+
+The visual layer runs on **Tailwind CSS**, loaded via its official
+zero-build **Play CDN** (`https://cdn.tailwindcss.com`) -- no npm install,
+no build step, JIT-compiles utility classes in the browser as the page
+renders. Colors are Tailwind's own stock palette (slate/blue/green/red/
+amber) used directly in markup, matching an explicit request to mirror
+Tailwind's own theme rather than a customized one -- there's no palette
+switcher and no custom color tokens anymore.
+
+Every control -- buttons (filled/outlined/text/icon), inputs, chips, the
+FAB -- uses `rounded-[0.3rem]` with `shadow-sm` for an elevated,
+rectangular look, also by explicit request (not Material's usual pill/
+circle shapes). Cards and dialogs, which are containers rather than
+controls, keep a more generous `rounded-xl`.
+
+**Dropdowns are `<ul>/<li>`, not native `<select>`/`<option>`** -- so they
+can be styled properly. Built as a progressive enhancement
+(`enhanceSelect()` in `app.js`): the real `<select>` stays in the DOM,
+visually hidden, and remains the actual source of truth for its value --
+every `.value` read, `FormData` collection, and `change` listener anywhere
+in the app keeps working completely unchanged. Any `<select
+class="js-enhance-select">` gets enhanced automatically on page load. One
+subtlety worth knowing if you ever touch this: the app sets a select's
+value programmatically in several places (reorder prefill, loading a saved
+Strategy/Program for editing) via plain `someSelect.value = x` --
+`enhanceSelect()` intercepts the actual `value` property setter (not just
+a MutationObserver, which wouldn't reliably catch a property write) so the
+visible dropdown stays in sync no matter which code path sets it.
+
+Form inputs are plain native HTML elements with a `field-input`/
+`field-label` class pairing, not a fancier animated-label component --
+this keeps every bit of order-placement data collection exactly as
+reliable as it's always been.
+
+### App structure: Portfolio / Regular OMS / Advanced OMS
+
+The nav is three things: the logo (always returns to **Portfolio**, the
+landing view -- combined KPIs + a combined Calendar spanning both OMS
+types), **Regular OMS** (Orders / Strategies / Calendar / Archive tabs,
+plus a "+ New Order" FAB), and **Advanced OMS** (Programs / Risk Groups /
+Archive / Calendar tabs). Not assumed to stay at exactly these two OMS
+types forever -- nothing in the nav mechanism hardcodes that count.
+
+New Order and Strategies both used to be their own standalone pages
+(`/order`, `/strategy`); they're dialogs/tabs inside Regular OMS now. Old
+bookmarks to either URL (including a `/order?reorder=<id>` deep link)
+still work and redirect to the right place automatically.
+
+### Login
+
+A simple session-based login gates the whole app -- see the Migration
+section at the top for the required `.env` setup. A few things worth
+knowing:
+
+- This is a login for **the app itself**, unrelated to your Tradejini
+  credentials.
+- **Login only gates viewing the app.** Trading (order reconciliation,
+  trailing, Program cycles, safeguards) keeps running exactly as
+  configured whether or not anyone is logged in -- verified by the fact
+  that every background loop is a plain asyncio task, never an HTTP
+  request, so none of it ever passes through the auth layer at all. Log
+  out at the end of the day; nothing stops.
+- Sessions are in-memory -- restarting the app means logging in again.
+- If a session expires while you're using the app, the next API call
+  redirects you to `/login` automatically rather than leaving the UI
+  silently broken.
+
+### Admin (the gear icon)
+
+Its own standalone page (`/admin`), deliberately tucked out of the
+top-level nav so failures don't demand attention they don't need --
+infrequent, setup-like usage fits a real page better than a dialog would,
+and it gives the Failures table room to actually breathe. Three tabs:
+
+- **General**: the Advanced OMS accent color (6 options, applied
+  immediately, persisted).
+- **Portfolio Safeguards**: the outer, all-Programs-combined daily-loss
+  ceiling (see "Safeguards" under Advanced OMS below) -- lives here rather
+  than inside any one Risk Group's tab, since it's a genuine app-level
+  setting spanning every Program, not something scoped to one Risk Group.
+- **Failures**: the same centralized failure log described above, with a
+  full UI -- filter by category, order ID, Program, OMS type (Regular/
+  Advanced), and date range.
+
+### Heartbeat (the "system" dot in the nav)
+
+A green/yellow/orange/red health indicator, hover for detail. Checks
+internet reachability (against a host unrelated to Tradejini specifically,
+so "no internet at all" and "Tradejini's having an outage" show up as
+distinguishable problems) and each configured broker's connection status
+-- built generically (a list of entities, not "the Tradejini connection"
+hardcoded) so a second broker or an exchange integration slots in later as
+one more entry, but honestly, today, that list only ever has exactly one
+thing in it. Also tracks the Program orchestration loop's own liveness --
+if it ever went silently stuck, the dot turns red regardless of what
+connectivity looks like, since a stuck loop you don't know about is
+arguably more dangerous than one you do.
+
+### Advanced OMS (Programs)
+
+A **Program** is a different kind of entity from a Strategy: where a
+Strategy is a passive SL/Target/trailing template you apply by hand to one
+order at a time, a Program actively *drives* orders itself, continuously,
+on its own schedule -- a separate top-level entity with its own page,
+distinct from the Strategy/Order relationship everywhere else in this app.
+
+**What it does, each cycle**: identifies the next expiry that's at least N
+working days out, fetches the underlying's live spot price, derives the
+ATM strike (the interval is read empirically from the actual option chain,
+not hardcoded per index), and buys the ATM Call and the ATM Put --
+"legs," each one a completely ordinary order underneath, using the exact
+same entry/exit/trailing/reconciliation machinery as everything else in
+this app, just placed automatically and tagged with which Program/cycle
+they belong to. Once **both** legs are closed (deliberately: a Program
+waits for both rather than racing to re-enter whichever side closes
+first, on the theory that one side losing while the other wins is the
+outcome being capitalized on, and rushing back into the losing side risks
+compounding it), it repeats, subject to Scheduling below and however long
+`inter_cycle_delay_seconds` says to wait first (0 = immediate re-entry).
+
+**Sizing**: two modes, chosen per Program.
+- *Lots* (the default, and what every Program from before this feature
+  existed keeps behaving as on upgrade): a fixed, equal number of lots on
+  both legs.
+- *Capital*: both legs get the **same rupee allocation**
+  (`capital_per_leg`) instead of the same contract count -- since CE/PE
+  premiums differ, this means lot counts will differ between the two
+  legs. Deliberate: equal capital gives predictable stop-loss risk on
+  both sides regardless of which leg happens to be pricier that day,
+  which matters more for this strategy's actual thesis (capturing the
+  *difference* between a winning and a losing side) than strict
+  delta-neutrality would. Both legs' live prices are fetched **before
+  either order is placed** -- if either can't be priced, the whole cycle
+  aborts rather than risking a half-placed straddle.
+
+**Paper vs Live**: chosen per Program, and this is the whole reason the
+order engine was built against a broker-agnostic interface from early on
+-- a Paper Program runs through the exact same expiry/ATM selection,
+safeguards, and order/exit/trailing/reconciliation machinery as a Live one,
+just routed to a simulated broker that fills against real live prices
+instead of placing real orders. You can run one Program live and several
+others on paper simultaneously, each fully independent -- useful for
+previewing how a Program would actually behave before trusting it with
+capital. The simulation is deliberately simplified (immediate market
+fills, limit/stop fills the moment price crosses the trigger, no partial
+fills, no broker-side rejections -- paper mode assumes capital/margin is
+always available) -- enough to validate orchestration logic, not a
+market-microstructure engine.
+
+**Margin pre-check** (Live Programs only): before placing a cycle's two
+legs, checks both together against Tradejini's own basket-margin endpoint
+and aborts the cycle if it reports a shortfall, rather than finding out
+only after a broker rejection. Deliberately tied to each Program's own
+broker specifically, not a portfolio-wide check -- if a second broker is
+ever added, each Program's margin check would correctly use whichever
+broker *that* Program actually trades through. A **failed check itself**
+(a timeout or API error, not a reported shortfall) does **not** block the
+cycle -- an extra API call failing shouldn't become a new reason an
+otherwise-valid trade doesn't happen, when the existing broker-rejection
+handling already covers that case at the actual place-order step.
+
+**Scheduling** -- a genuinely different question from Safeguards below:
+*when* (and on which days) a Program is even eligible to consider a new
+cycle, independent of whether it's performing well. Configurable per
+Program:
+- `continuous`: if on, ignores everything else below -- always eligible
+  (e.g. a Crypto Program meant to run 24 hours with no day-start gate at
+  all).
+- `start_time` / `end_time`: a daily window (e.g. start at 9:30 instead of
+  9:15). A cycle already open when `end_time` passes keeps running its own
+  SL/Target/trailing/time-exit normally into the close -- this only ever
+  governs *starting* a new cycle.
+- `days`: `"all"` or `"expiry_day"` -- e.g. a Program meant to run only on
+  expiry day, in a narrow window (2:30-3:15), combines a tight `start_time`/
+  `end_time` with `days: "expiry_day"`.
+
+**Archiving**: orthogonal to a Program's own status (running/stopped/
+halted) -- an archived Program never starts a new cycle, full stop,
+regardless of what its status says, until explicitly unarchived. If it
+happens to have a cycle open at the moment you archive it, that cycle
+keeps running normally to close -- archiving only ever blocks *future*
+cycles, same "never touch open positions" principle as everything else in
+this app. Archived Programs live in their own tab, separate from the
+active list.
+
+**Advanced OMS's own tabs**: Programs, Risk Groups (see Safeguards below),
+Archive, and its own Calendar -- mirroring Regular OMS's own tab structure
+for consistency. Advanced OMS uses its own accent color throughout
+(indigo by default, configurable in Admin -> General) so which "mode"
+you're looking at is legible at a glance.
+
+**Safeguards** -- three tiers now, each with the layered design and
+reasoning this document already covers for trailing failures: throttles
+that resolve themselves without a person, and hard stops that require one.
+
+- *Throttles*: past a configured max cycles/day, every subsequent cycle
+  that day waits a cooldown before starting -- a standing slow-down for
+  the rest of the day, not a one-time pause.
+- *Hard stop* (per-Program): N consecutive losing cycles, or today's
+  realized P&L crossing a configured rupee floor. Halts that Program --
+  no new cycle starts -- until a person reviews and resumes it from the
+  Program's own card. **Resuming resets the consecutive-loss streak** (a
+  human review is exactly the reset condition that streak is meant to
+  wait for) but **never touches today's realized P&L** -- if the halt was
+  for the daily cap, resuming clears the status but the Program correctly
+  stays inactive for the rest of the day, since the underlying number that
+  caused it hasn't changed.
+- *Hard stop* (**Risk Group** -- a correlation-based grouping you define
+  yourself, e.g. "Stock F&O", "Commodity Oil", "Commodity Gold", "Crypto"
+  -- deliberately not a fixed textbook asset-class taxonomy, since two
+  things in the same formal class, like Oil and Gold, don't necessarily
+  move together): one daily-loss cap across every Program in that group --
+  by default the sum of its members' own caps, or an explicit override.
+  **Strict**: crossing it halts every running Program *in that group*,
+  even ones still comfortably under their own individual cap. This is
+  where the "correlated underlyings mean a bad day is usually a regime
+  day" reasoning actually belongs -- scoped to Programs that are actually
+  likely to be correlated with each other, not applied indiscriminately
+  across everything you're running (an earlier, single-tier version of
+  this safeguard made exactly that mistake: a Stock F&O Program having a
+  bad day would have halted a perfectly healthy, unrelated Crypto Program
+  too, for no defensible reason).
+- *Hard stop* (**Portfolio**, global, **toggleable on/off**): one daily-
+  loss cap across every Program combined regardless of group -- by default
+  the sum of every Risk Group's own cap, or an explicit override. Also
+  Strict. With Risk Group now doing the correlation-aware halting,
+  Portfolio's own reasoning is simpler: it's just your own stated total
+  daily risk ceiling, for its own sake, independent of what caused it --
+  which is why it's optional. Turn it off if Risk Group alone covers what
+  you need.
+- A hard stop or a manual Stop **never** touches currently-open legs --
+  those keep running their own protection untouched. Closing what's open
+  immediately is the separate, explicit **Stop & Flatten** action.
+- **A known, bounded timing edge case worth knowing about**: each tick
+  recomputes Risk Group/Portfolio aggregates once, at the start of that
+  tick, *before* processing that same tick's cycle closures -- so a cycle
+  that closes with a big loss this tick won't be reflected in the group/
+  portfolio aggregate until the *next* tick (`TICK_INTERVAL_SECONDS`,
+  15s by default). The Program whose cycle just closed can never race
+  itself on this (it never considers starting a new cycle in the same
+  tick its own cycle closed in), but in principle a *different* Program in
+  the same Risk Group, evaluated later in that same tick, could start one
+  more cycle before the group's breach is caught -- self-correcting within
+  one tick either way, and every other layer (that Program's own cap, the
+  next tick's group check) still applies on top. Not considered worth the
+  added complexity of a two-pass tick to close a multi-Program-same-tick
+  window this narrow, but worth knowing the shape of it.
+
+**Combined KPIs**: the Dashboard's top-level P&L cards combine Regular and
+Advanced OMS together; Regular OMS and Advanced OMS each also show their
+own scoped figures at the top of their respective tab. Each metric (Day
+P&L, Overall P&L, days traded/profit/loss) is its own small card -- one
+shared `kpiCardsHtml()` helper in `app.js` renders all three of these
+(top-level, Regular OMS, Advanced OMS), so a layout change to it applies
+everywhere at once. Advanced OMS legs never appear in the Regular OMS order
+list (they'd mostly be noise -- many small re-entries through the day) but
+always count toward the combined totals.
+
+---
+
+## 7. Project layout
+
+```
+backend/
+  main.py               Starlette app, REST + websocket routes, startup wiring,
+                          login/session enforcement, the Heartbeat check loop
+  auth.py                 session-based login for the app itself (separate from
+                          Tradejini credentials) -- middleware gates every route
+                          by default, so a new route is protected without having
+                          to remember to add a check to it
+  order_manager.py       the order state machine -- offset -> price resolution at fill
+                          time, exit-mode dispatch (Both/SL-only/Target-only/none),
+                          also what every Advanced OMS leg (live or paper) is
+                          placed/tracked through -- one instance per broker (live,
+                          paper), same code path either way
+  broker_interface.py     a Protocol order_manager/program_manager depend on instead
+                          of TradejiniClient directly -- the seam that makes
+                          PaperBrokerClient (below) a true drop-in
+  tradejini_client.py     REST API wrapper (auth, orders, plain modify, cancel,
+                          script master, margin checks)
+  paper_broker.py          simulates fills against live prices for Paper-mode
+                          Programs -- a real BrokerClient implementation, not a
+                          mock; the exact same order/exit/trailing/reconciliation
+                          code in order_manager.py runs against it unmodified
+  script_master.py          fetches/caches Tradejini's live instrument-master feed;
+                          expiry/ATM-strike/strike-interval lookups for Advanced OMS
+  program_manager.py       the Advanced OMS orchestration engine -- the cycle
+                          lifecycle (start/track/close), capital-spread sizing,
+                          the margin pre-check, routing each Program to its live
+                          or paper OrderManager based on its own `mode`
+  program_safeguards.py     pure, isolated safeguard decision logic (throttles, hard
+                          stops, Risk Group / Portfolio halts) -- kept dependency-free
+                          specifically so it can be tested exhaustively
+  program_schedule.py       pure scheduling logic (start/end window, continuous
+                          flag, day-filter, inter-cycle delay) -- WHEN a Program is
+                          eligible to trade, a different question from whether it
+                          should stop (that's program_safeguards.py)
+  heartbeat.py              pure health-zone computation (green/yellow/orange/red)
+                          + the internet-reachability check
+  failure_log.py            centralized data/failures.jsonl -- see "Centralized
+                          failure log" above
+  stream_manager.py         asyncio bridge around the vendored streaming SDK --
+                          shared by both the live and paper OrderManager instances;
+                          tracks each one's own subscription set separately so
+                          neither wipes out the other's (see set_trailing_symbols)
+  nxtradstream.py           vendored Tradejini streaming SDK (unmodified, except one
+                          documented raw-string fix for a Python deprecation warning)
+  store.py                  JSON read/write for orders (incl. archive), strategies,
+                          Programs, Risk Groups, portfolio safeguards, app settings
+  models.py                  StrategyConfig, CreateOrderRequest, ProgramConfig,
+                          SafeguardsConfig, ScheduleConfig, RiskGroupConfig,
+                          PortfolioSafeguards -- plain dataclasses, no compiled deps
+  config.py                   reads .env, defines every data/ subfolder
+frontend/
+  login.html                       standalone login page (outside the auth-gated shell)
+  admin.html                        standalone Admin page (accent color, Portfolio
+                                  Safeguards, Failures browser) -- infrequent/setup-like
+                                  usage, so a real page rather than a dialog
+  index.html                        the whole app shell -- nav, Portfolio/Regular
+                                  OMS/Advanced OMS sections, every dialog
+  app.js                            shared helpers: the ul/li dropdown enhancer, the
+                                  Info panel, shared P&L/KPI computation, the
+                                  Heartbeat indicator, session-expiry handling
+  dashboard.js / archive.js / calendar.js   Regular OMS's Orders/Archive/Calendar tabs
+  order.js                          New Order, now a dialog (was order.html)
+  strategies.js                     Strategy management, now a Regular OMS tab
+                                  (was strategy.html)
+  programs.js                       Advanced OMS: Program/Risk Group cards, create/
+                                  edit dialogs, cycle drill-down, Paper/Live +
+                                  capital sizing controls
+  admin.js                          Admin page logic: accent color, Portfolio
+                                  Safeguards, Failures browser
+  tabs.js                           all tab/section-switching logic
+  style.css                         custom CSS layer -- dialog show/hide, the ul/li
+                                  dropdown, the Advanced OMS accent CSS variables
+data/
+  orders/               one JSON file per order -- trade history + resolved state,
+                          including Advanced OMS legs (tagged with program_id/cycle_id),
+                          both live and paper
+  orders/archive/        archived orders -- still counts toward P&L/KPIs, still
+                          visible in Calendar
+  strategies/             one JSON file per saved Strategy template
+  programs/                one JSON file per Program (config + runtime state + logs
+                          + numbered cycle history + the archived flag)
+  risk_groups/              one JSON file per Risk Group (name + optional cap override)
+  script_master/             cached index/option data from Tradejini's live feed,
+                          refetched automatically when their version changes
+  portfolio_safeguards.json  the portfolio-wide daily-loss cap + its on/off toggle
+  app_settings.json          small app-level preferences (currently: Advanced OMS
+                          accent color)
+  market_holidays.json       optional -- exchange holidays for correct expiry
+                          working-day counting (see Migration above)
+  failures.jsonl            centralized operational failure log, see above
+```
+
+---
+
+## 8. Product proposals (not built -- confirm if you want any of these)
+
+A few things stood out while working through this round of changes that
+felt worth surfacing rather than building speculatively:
+
+1. **Position-level view, not just order-level.** Right now each order
+   card is exactly one entry + its exit. If you routinely scale into the
+   same symbol across multiple orders, a "position" rollup (net qty,
+   blended entry, combined P&L across the orders that make it up) sitting
+   above the individual order cards could be more useful than reading
+   several cards and adding them up yourself.
+2. **Strategy-level default exit mode.** Exit legs (both/SL-only/etc.) are
+   currently chosen fresh on every order. If you find yourself always
+   picking the same exit mode for a given strategy, it could default from
+   the strategy (still overridable per-order) rather than always starting
+   at "Both."
+3. **A real card redesign**, not just the spacing/overlap fixes in this
+   round. The order card is doing a lot -- status, prices, P&L, buy/sell
+   amounts, close controls, logs -- and a tabbed or collapsible layout
+   (e.g. "Overview" / "Manage" / "Logs" as separate views within the card)
+   could reduce how much is on screen at once for a card you're not
+   actively acting on, while keeping everything reachable.
+
+None of these are built. Say the word on any of them and they're next.
+
+## 9. Phase 3/4 roadmap (deliberately not built yet -- design notes only)
+
+These are larger, deliberately deferred items, written up in enough
+design detail to hand to a fresh Claude session (e.g. after moving this
+project to a Claude Project with multiple focused chats) and ask for
+directly, without needing to re-derive the reasoning from scratch.
+
+### Timeframe-aggregated trailing and exit checks (instead of per-tick)
+
+**The problem**: right now, every single live tick that arrives for a
+symbol immediately runs trailing recalculation and the stop/target
+trigger check (see `handle_l1_tick` in `order_manager.py`). In a fast,
+choppy market this is noisy -- the stop/target can trail on every small
+wiggle, and the exit check fires the instant price crosses a trigger even
+if that cross is a single noisy tick rather than a sustained move.
+
+**The proposed fix**: a per-Program (and ideally per-Strategy, for
+Regular OMS orders too) configurable timeframe -- trailing recalculation
+and the exit trigger check would act on an AGGREGATED price over that
+window (e.g. the window's closing price, or its VWAP) rather than on
+every raw tick. Default: no aggregation (today's exact behavior, acting
+on every tick) so nothing changes for anyone who doesn't opt in. Options
+to offer: **5s, 10s, 30s, 1min, 3min, 5min, and a custom seconds value**.
+
+**Design notes for whoever builds this**:
+- This needs a new small piece of per-order state: a rolling buffer of
+  ticks (or just a running OHLC/VWAP accumulator, cheaper than storing
+  every tick) since the start of the current window, plus a timestamp for
+  when the current window opened.
+- `handle_l1_tick` would feed every raw tick into the accumulator
+  unconditionally (so live P&L display can stay tick-accurate, since
+  that's a display concern, not a decision concern), but only run
+  `_maybe_trail` / `_maybe_app_market_exit` when the current window has
+  actually elapsed, using the aggregated value for that window rather
+  than the raw tick that happened to close it.
+- Needs a field on `ScheduleConfig` (Programs) and probably a new field on
+  `StrategyConfig` (Regular OMS) -- something like
+  `trail_check_interval_seconds: int = 0` (0 meaning "no aggregation,
+  today's behavior").
+- Worth deciding up front whether the exit-trigger check and the
+  trailing-recalculation check should be allowed to use DIFFERENT
+  timeframes, or must always share one -- simpler to build as one shared
+  setting first, split later only if it turns out to matter.
+- The custom-seconds option needs its own input alongside the preset
+  dropdown, shown only when "custom" is selected.
+
+### Market vs. Limit order for the close (configurable per Program)
+
+**Directly related to timeframe-aggregated trailing above**: once a
+close decision is based on an aggregated value over a window rather than
+the instant a raw tick crosses a trigger, firing an unconditional market
+order at that moment is a slightly different tradeoff than it is today --
+a limit order at (or near) the trigger price becomes a more natural fit,
+since the aggregation already smooths out the single-tick noise a market
+order's "close at any price right now" is mainly guarding against.
+
+**The proposed fix**: a per-Program (and per-Strategy) configurable
+choice for the close order type -- Market (today's only option) or Limit
+(at the trigger price, or trigger plus/minus a configurable buffer).
+Configured on the Program/Strategy create-edit dialog, alongside the
+timeframe setting above.
+
+**Design notes for whoever builds this**:
+- A limit order isn't guaranteed to fill at all (price could move past it
+  before it's matched) -- this needs its own timeout/fallback story (e.g.
+  "if not filled within N seconds, cancel and re-fire as a market order"),
+  which can mostly reuse the stuck-square-off timeout mechanism already
+  built for the market-order path (`SQUARE_OFF_STUCK_TIMEOUT_SECONDS` in
+  `order_manager.py`) rather than needing something new from scratch.
+- Worth deciding whether the limit price should be exactly the trigger
+  price, or the trigger plus/minus a small buffer in the favorable
+  direction (to increase fill likelihood at a small cost to price) --
+  probably worth making that buffer configurable too, defaulting to 0.
+
+### Broker reconciliation (sync Trading Station's own records against the broker's)
+
+**The problem**: right now, this app's own JSON files (`data/orders/`,
+Program `cycles` history) are the only source of truth it ever checks
+against itself -- there's no periodic "does what I think happened
+actually match what the broker's own records say happened" pass. If
+something in this app's own state ever drifts from reality (a missed
+tick, a reconciliation edge case not yet found, anything), there's
+currently no self-healing check that would catch and correct it after
+the fact.
+
+**The proposed fix**: a reconciliation job -- fetch the broker's own
+order history (Tradejini's `get_orders`/`get_trades`, or whatever
+endpoint gives a authoritative closed-order list) for a given day, and
+for every CLOSED order in this app's own records, compare (order status,
+fill price, quantity, realized P&L) against what the broker's own record
+says, updating this app's own JSON (order file, and by extension the
+owning cycle's persisted record in the Program's `cycles` list, and
+`daily_realized_pnl` if it turns out to be wrong) wherever they disagree.
+
+**Design notes for whoever builds this**:
+- Scope this to CLOSED orders only, at least at first -- reconciling
+  currently-OPEN positions against a mid-flight broker state is a much
+  harder problem (that's what the existing live reconciliation loop
+  already does, continuously); this is specifically about catching drift
+  in the historical record after the fact, not replacing the live loop.
+- Whether this runs as a background job (e.g. once at end of day) or is
+  triggered on demand from the UI (an "Reconcile now" button) is worth
+  deciding based on how much you trust the live loop by the time this
+  gets built -- an on-demand button is the safer place to start.
+- Needs to decide what "disagreement" means precisely (exact price match?
+  a tolerance?) and needs a clear, visible log/report of what it changed,
+  not just silent correction -- the whole point is trust, so the
+  correction itself needs to be auditable.
+- This is the natural, safer place to also close the earlier gap flagged
+  when Paper/Live mode shipped: only paper orders' `get_positions`/
+  `get_trades` were ever stubbed to raise (deliberately, so tier-1 order
+  matching stayed authoritative for paper) -- a real reconciliation pass
+  is where actually calling the LIVE broker's real positions/trades
+  endpoints for cross-checking purposes would make sense.
+
+### Programs decoupled from Index -- any tradeable instrument, not just an Index
+
+**The problem**: a Program today is tightly coupled to trading an Index's
+ATM straddle specifically (`ProgramConfig.index_id`, the whole
+expiry/ATM-selection flow in `program_manager.py`'s `_start_new_cycle`
+assumes an index + its option chain). There's no way to build a Program
+around, say, a single equity script, a futures contract, or any other
+instrument shape.
+
+**Design notes for whoever builds this**: this is a genuinely bigger
+change than it might look, since `_start_new_cycle`'s whole shape (spot
+price -> derive ATM strike -> buy CE + PE) is specific to an
+index-options straddle -- it isn't just a matter of swapping which
+`symId` gets used. Two real approaches worth weighing against each other
+before starting:
+1. Keep Program's cycle logic index-options-specific (as today), and add
+   a genuinely SEPARATE, simpler Program type for a single-instrument
+   strategy (buy/sell one script on a schedule, no ATM/expiry logic at
+   all) -- less reuse, but a much smaller, safer change.
+2. Generalize `_start_new_cycle` into a pluggable "leg selection"
+   strategy (index-ATM-straddle is one implementation; a single-script
+   entry is another, simpler one) -- more reuse and more architecturally
+   "correct," but touches the core orchestration logic that safeguards,
+   scheduling, and margin-checking all currently assume a 2-leg cycle
+   shape, so this needs real care to avoid regressing anything already
+   working.
+Given how safety-critical this file already is, option 1 is very likely
+the safer starting point even though it duplicates some logic, unless
+there's a clear near-term need for more than a couple of different
+Program shapes.
+
+
+### More Feature Requests
+Review and work on MD files under "Additional Feature Requests root" folder.
+Each file moves to "done" inside "Additional Feature Requests root" folder once they are implemented

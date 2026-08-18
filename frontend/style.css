@@ -1,0 +1,157 @@
+/* ============================================================
+   Trading Station -- custom CSS layer, light theme.
+
+   Deliberately minimal: Tailwind's own stock color scale (slate/blue/
+   green/red/amber) is used directly in markup everywhere -- no custom
+   palette tokens, no CSS-variable-backed colors, no runtime palette
+   switcher (removed; "match the Tailwind kit's theme exactly, including
+   the color palette" means the emphasis is on being CONSISTENT with
+   Tailwind's own defaults, not customizable away from them).
+
+   This file only covers what Tailwind utility classes genuinely can't
+   express on their own: elevated/pressed button states, the custom ul/li
+   dropdown widget (replacing native <select> visually while a real
+   <select> still drives all form data underneath), and dialog/snackbar
+   show-hide transitions.
+
+   Shape convention used everywhere in markup: rounded-[0.3rem] on every
+   control (buttons, icon buttons, inputs, the dropdown trigger, chips),
+   shadow-sm/shadow on all of them for the "elevated" look -- rounded-xl
+   is reserved for CONTAINERS (cards, dialogs) which aren't controls
+   themselves.
+   ============================================================ */
+
+body { font-family: "Roboto", sans-serif; }
+
+/* ------------------------------------------------------------ buttons -- */
+
+.btn-elevated-press:active { box-shadow: none; transform: translateY(1px); }
+
+/* --------------------------------------------------- ul/li dropdown -- */
+/*
+  Progressively enhances a real <select class="js-enhance-select"> into a
+  ul/li widget (see app.js enhanceSelect()) -- the native <select> stays in
+  the DOM (visually hidden), still holds the real value, still fires
+  'change', still participates in FormData. Nothing about existing form
+  logic anywhere in the app needed to change: every .value read, every
+  addEventListener('change', ...) keeps working exactly as before, since
+  they all still operate on the real, original <select> element.
+*/
+.select-native-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+.select-list {
+  position: absolute; z-index: 40; top: calc(100% + 4px); left: 0; right: 0;
+  max-height: 260px; overflow-y: auto;
+  background: white; border: 1px solid rgb(203 213 225); border-radius: 0.3rem;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+.select-list.hidden { display: none; }
+.select-option {
+  padding: 8px 12px; font-size: 14px; cursor: pointer; color: rgb(15 23 42);
+}
+.select-option:hover, .select-option.active { background: rgb(239 246 255); color: rgb(29 78 216); }
+
+/* --------------------------------------------------------- dialogs -- */
+/*
+  WARNING, from experience: this exact bug has happened TWICE now (the
+  #programDialogRoot omission that blocked the whole page on load, then
+  the #orderDialogRoot omission found a few rounds later) -- adding a new
+  dialog to index.html and forgetting to add its id to BOTH rules below
+  means it renders as a normal visible block on every page load, with no
+  way to dismiss it, since there's no "hidden" state for .show to toggle
+  from. Whenever a new `<div id="...DialogRoot">` is added anywhere in
+  index.html, its id MUST be added to both selector lists below in the
+  SAME edit -- not as a follow-up, not "I'll get to it."
+*/
+#dialogRoot, #dayDialogRoot, #programDialogRoot, #orderDialogRoot {
+  display: none;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+#dialogRoot.show, #dayDialogRoot.show, #programDialogRoot.show, #orderDialogRoot.show {
+  display: flex;
+  opacity: 1;
+}
+.dialog-backdrop { background: rgb(15 23 42 / 0.4); }
+
+/* -------------------------------------------------------- snackbar -- */
+
+#snackbar {
+  opacity: 0;
+  bottom: -100px;
+  transition: opacity 300ms ease, bottom 300ms ease;
+}
+#snackbar.show { opacity: 1; bottom: 24px; }
+
+/* ---------------------------------------------------- form fields -- */
+
+.field-label {
+  font-size: 10px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
+  color: rgb(100 116 139); margin-bottom: 3px; display: block;
+}
+.field-input {
+  box-sizing: border-box;
+  height: 42px;
+  width: 100%; background: white;
+  border: 1px solid rgb(203 213 225);
+  border-radius: 0.3rem; padding: 0 14px; font-size: 14px;
+  color: rgb(15 23 42); font-family: "Roboto", sans-serif;
+  line-height: 1;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.field-input:hover { border-color: rgb(148 163 184); }
+.field-input:focus {
+  outline: none; border-color: rgb(37 99 235);
+  box-shadow: 0 0 0 3px rgb(37 99 235 / 0.15);
+}
+.field-input:disabled { opacity: 0.5; background: rgb(248 250 252); }
+.field-input::placeholder { color: rgb(148 163 184); }
+
+/* --------------------------------------------------------- scrollbar -- */
+
+.scrollbars::-webkit-scrollbar { width: 6px; }
+.scrollbars::-webkit-scrollbar-thumb { background: rgb(203 213 225); border-radius: 10px; }
+
+/* --------------------------------------------------------------- misc -- */
+
+.material-symbols-outlined {
+  font-family: "Material Symbols Outlined";
+  font-weight: normal; font-style: normal; font-size: 20px; line-height: 1;
+  letter-spacing: normal; text-transform: none; display: inline-block;
+  white-space: nowrap; word-wrap: normal; direction: ltr; -webkit-font-smoothing: antialiased;
+  vertical-align: middle;
+}
+
+/* ------------------------------------------------ Advanced OMS accent -- */
+/*
+  A deliberately narrow, targeted use of CSS custom properties -- NOT a
+  return to the app-wide palette-variable system that was removed in favor
+  of stock Tailwind colors. This exists specifically because the accent
+  color is user-configurable at runtime (Settings), and a Tailwind class
+  built as a JS template string (e.g. `bg-${accent}-600`) depends on the
+  Play CDN's dynamic re-scanning correctly catching it after the fact --
+  not something verifiable without a browser to test in. CSS variables are
+  resolved by the browser directly, independent of Tailwind's JIT
+  entirely, which removes that whole category of risk for this one
+  specific, deliberately-dynamic case. Defaults to indigo; app.js applies
+  the saved choice on load via setProperty() on these three variables.
+*/
+:root {
+  --adv-accent-50: 238 242 255;
+  --adv-accent-200: 199 210 254;
+  --adv-accent-600: 79 70 229;
+  --adv-accent-700: 67 56 202;
+}
+.adv-accent-bg-50 { background-color: rgb(var(--adv-accent-50)); }
+.adv-accent-border-200 { border-color: rgb(var(--adv-accent-200)); }
+.adv-accent-border-600 { border-color: rgb(var(--adv-accent-600)); }
+.adv-accent-text-600 { color: rgb(var(--adv-accent-600)); }
+.adv-accent-text-700 { color: rgb(var(--adv-accent-700)); }
+.adv-accent-bg-600 { background-color: rgb(var(--adv-accent-600)); }
+.adv-accent-bg-600:hover { background-color: rgb(var(--adv-accent-700)); }
+.adv-accent-hover-text-600:hover { color: rgb(var(--adv-accent-600)); }
+.adv-accent-hover-bg-50:hover { background-color: rgb(var(--adv-accent-50)); }
+body.adv-active { background-color: rgb(var(--adv-accent-50)); }  /* whole-page tint while Advanced OMS is
+                                                                      the active section, not just its
+                                                                      individual buttons/controls */
