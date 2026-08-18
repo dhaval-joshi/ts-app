@@ -926,17 +926,33 @@ fills, no broker-side rejections -- paper mode assumes capital/margin is
 always available) -- enough to validate orchestration logic, not a
 market-microstructure engine.
 
-**Margin pre-check** (Live Programs only): before placing a cycle's two
-legs, checks both together against Tradejini's own basket-margin endpoint
-and aborts the cycle if it reports a shortfall, rather than finding out
-only after a broker rejection. Deliberately tied to each Program's own
-broker specifically, not a portfolio-wide check -- if a second broker is
-ever added, each Program's margin check would correctly use whichever
-broker *that* Program actually trades through. A **failed check itself**
-(a timeout or API error, not a reported shortfall) does **not** block the
-cycle -- an extra API call failing shouldn't become a new reason an
-otherwise-valid trade doesn't happen, when the existing broker-rejection
-handling already covers that case at the actual place-order step.
+**Margin pre-check with a buffer, and a strangle-widening retry** (Live
+Programs only): before placing a cycle's two legs, checks both together
+against Tradejini's own basket-margin endpoint -- but requires available
+margin to cover `requiredMargin * MARGIN_SAFETY_BUFFER` (10% by default,
+`program_manager.MARGIN_SAFETY_BUFFER`), not just the broker's own
+zero-buffer shortfall figure, since "exactly enough" is too tight to
+reliably enter a live cycle. If the plain ATM straddle doesn't clear that
+buffered check, the cycle is NOT simply abandoned: it retries progressively
+**widened into a strangle** -- CE at ATM+N strikes, PE at ATM-N strikes,
+for N = 1..`STRANGLE_WIDEN_MAX_STEPS` (3 by default) -- since widening
+symmetrically is what reliably lowers combined premium/margin (shifting a
+*shared* straddle strike doesn't: one leg gets more ITM as the other gets
+more OTM, so the net effect on combined cost is ambiguous). The first
+candidate (ATM, then widened offsets in order) that passes is what
+actually gets placed; a widened cycle's Starting-cycle log line says so
+explicitly. If every candidate fails, nothing is placed, a persistent
+**Alert** banner appears on the Program's card (distinct from a halt --
+the Program keeps running and retries automatically next tick, same as
+every other "can't start a cycle" precheck), and it's logged clearly. Only
+a check that **succeeds** and reports insufficient margin blocks a
+candidate -- a **failed check itself** (timeout or API error) does not,
+same reasoning as before: an extra API call failing shouldn't become a new
+reason an otherwise-valid trade doesn't happen. Deliberately tied to each
+Program's own broker specifically, not a portfolio-wide check. Paper
+Programs never widen and never margin-check at all (`PaperBrokerClient`
+has no basket-margin endpoint -- paper mode deliberately assumes capital
+is always available by design, see below).
 
 **Scheduling** -- a genuinely different question from Safeguards below:
 *when* (and on which days) a Program is even eligible to consider a new
@@ -1010,6 +1026,17 @@ that resolve themselves without a person, and hard stops that require one.
 - A hard stop or a manual Stop **never** touches currently-open legs --
   those keep running their own protection untouched. Closing what's open
   immediately is the separate, explicit **Stop & Flatten** action.
+- **Close Cycle** is a different, narrower manual action from Stop &
+  Flatten: it closes just the active cycle's open leg(s) at market and
+  lets the Program keep running otherwise -- for "I'm happy with this
+  cycle's P&L, close it now" without stopping the Program the way Stop &
+  Flatten does. Each leg's order record gets a distinct
+  `close_reason: "program_cycle_manual_close"` for traceability. Once both
+  legs actually resolve, the normal per-tick cycle wrap-up picks it up
+  automatically -- P&L, safeguard counters, and cycle history are all
+  updated exactly as they would be for an automatic SL/target/time-exit
+  close; a manually-closed cycle's result counts toward the daily total
+  and the consecutive-loss streak the same as any other cycle's does.
 - **A known, bounded timing edge case worth knowing about**: each tick
   recomputes Risk Group/Portfolio aggregates once, at the start of that
   tick, *before* processing that same tick's cycle closures -- so a cycle
@@ -1166,44 +1193,50 @@ design detail to hand to a fresh Claude session (e.g. after moving this
 project to a Claude Project with multiple focused chats) and ask for
 directly, without needing to re-derive the reasoning from scratch.
 
-### Timeframe-aggregated trailing and exit checks (instead of per-tick)
+### Timeframe-aggregated trailing and exit checks -- BUILT
 
-**The problem**: right now, every single live tick that arrives for a
-symbol immediately runs trailing recalculation and the stop/target
-trigger check (see `handle_l1_tick` in `order_manager.py`). In a fast,
-choppy market this is noisy -- the stop/target can trail on every small
-wiggle, and the exit check fires the instant price crosses a trigger even
-if that cross is a single noisy tick rather than a sustained move.
+Originally written up here as a Phase 3/4 proposal; now implemented, with
+two refinements beyond what was originally sketched below (kept for
+context on how the design evolved):
 
-**The proposed fix**: a per-Program (and ideally per-Strategy, for
-Regular OMS orders too) configurable timeframe -- trailing recalculation
-and the exit trigger check would act on an AGGREGATED price over that
-window (e.g. the window's closing price, or its VWAP) rather than on
-every raw tick. Default: no aggregation (today's exact behavior, acting
-on every tick) so nothing changes for anyone who doesn't opt in. Options
-to offer: **5s, 10s, 30s, 1min, 3min, 5min, and a custom seconds value**.
+- **Aggregation value: the window's MEDIAN tick, not its closing tick.** A
+  closing-price approach still lets a single spike sitting right at the
+  end of a window fully decide that window's outcome -- it only reduces
+  how *often* a bad tick can matter, not how much any one bad tick can
+  distort the decision. The median of every tick seen during the window
+  actually dilutes a one-tick outlier. VWAP wasn't buildable -- the live
+  tick payload doesn't carry volume.
+- **`exit_confirmation_windows` (Program-only)**: a crossed stop/target
+  trigger must stay crossed for this many CONSECUTIVE evaluations (one
+  evaluation = one raw tick if aggregation is off, or one window close
+  otherwise) before the close actually fires -- 1 (default) fires on the
+  first crossing, same as before this feature existed. A recovery
+  (an evaluation that DOESN'T cross) resets the streak to zero. Not
+  offered on Regular OMS Strategies, only on Programs.
 
-**Design notes for whoever builds this**:
-- This needs a new small piece of per-order state: a rolling buffer of
-  ticks (or just a running OHLC/VWAP accumulator, cheaper than storing
-  every tick) since the start of the current window, plus a timestamp for
-  when the current window opened.
-- `handle_l1_tick` would feed every raw tick into the accumulator
-  unconditionally (so live P&L display can stay tick-accurate, since
-  that's a display concern, not a decision concern), but only run
-  `_maybe_trail` / `_maybe_app_market_exit` when the current window has
-  actually elapsed, using the aggregated value for that window rather
-  than the raw tick that happened to close it.
-- Needs a field on `ScheduleConfig` (Programs) and probably a new field on
-  `StrategyConfig` (Regular OMS) -- something like
-  `trail_check_interval_seconds: int = 0` (0 meaning "no aggregation,
-  today's behavior").
-- Worth deciding up front whether the exit-trigger check and the
-  trailing-recalculation check should be allowed to use DIFFERENT
-  timeframes, or must always share one -- simpler to build as one shared
-  setting first, split later only if it turns out to matter.
-- The custom-seconds option needs its own input alongside the preset
-  dropdown, shown only when "custom" is selected.
+Otherwise as designed: `trail_check_interval_seconds` (0 = off, react to
+every raw tick; presets 5s/10s/30s/1min/3min/5min plus a custom-seconds
+input) exists on both `StrategyConfig` and `ProgramConfig`, feeding both
+trailing recalculation and the exit-trigger check from one shared
+setting. Live P&L / `last_ltp` display still updates on every raw tick
+regardless -- only the trailing/exit DECISION is gated. One placement
+deviation from the original sketch below: `trail_check_interval_seconds`
+lives as a **top-level `ProgramConfig` field**, not on `ScheduleConfig`
+-- `ScheduleConfig`'s own docstring scopes it strictly to cycle-*start*
+eligibility, a different concern from exit-check cadence, which sits
+closer in kind to `stop`/`target`/`time_exit`. Per-order window/
+confirmation-streak state is in-memory only (`OrderManager._trail_state`),
+never persisted, mirroring `_latest_prices` -- losing it mid-window on a
+restart just means the next window starts fresh, which is harmless.
+
+Original design sketch, for context:
+
+**The problem**: every single live tick that arrives for a symbol
+immediately ran trailing recalculation and the stop/target trigger check
+(see `handle_l1_tick` in `order_manager.py`). In a fast, choppy market
+this was noisy -- the stop/target could trail on every small wiggle, and
+the exit check fired the instant price crossed a trigger even if that
+cross was a single noisy tick rather than a sustained move.
 
 ### Market vs. Limit order for the close (configurable per Program)
 

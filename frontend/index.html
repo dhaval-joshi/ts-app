@@ -242,6 +242,34 @@
             </div>
           </fieldset>
 
+          <fieldset class="border border-slate-200 rounded-xl p-5">
+            <legend class="px-2 text-sm font-medium text-blue-700">Timeframe aggregation</legend>
+            <p class="text-xs text-slate-400 mb-3">
+              Reduces sensitivity to single-tick noise in a choppy market: trailing and the stop/target
+              check re-evaluate on this cadence instead of every raw tick, using the MEDIAN price seen
+              during the window rather than one noisy instant tick. Execution is unchanged -- a confirmed
+              trigger still fires a plain market order. Off (0) = react to every tick, today's exact behavior.
+            </p>
+            <div class="grid sm:grid-cols-2 gap-4">
+              <div><label class="field-label">Re-evaluation interval</label>
+                <select name="trail_check_interval_preset" id="trailIntervalMode" class="js-enhance-select field-input">
+                  <option value="0">Off -- every tick (default)</option>
+                  <option value="5">5 seconds</option>
+                  <option value="10">10 seconds</option>
+                  <option value="30">30 seconds</option>
+                  <option value="60">1 minute</option>
+                  <option value="180">3 minutes</option>
+                  <option value="300">5 minutes</option>
+                  <option value="custom">Custom...</option>
+                </select>
+              </div>
+              <div class="hidden" id="trailIntervalCustomField">
+                <label class="field-label">Custom interval (seconds)</label>
+                <input name="trail_check_interval_custom" type="number" min="1" step="1" class="field-input" />
+              </div>
+            </div>
+          </fieldset>
+
           <button type="button" onclick="document.getElementById('strategyForm').requestSubmit()"
             class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium bg-blue-600 text-white shadow-sm hover:bg-blue-700 self-start">
             Save strategy

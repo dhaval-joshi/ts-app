@@ -269,18 +269,45 @@ class ScriptMaster:
             return None
         return min(diffs)
 
-    def atm_pair(self, index_id: str, expiry: date, spot: float):
-        """Returns (CE, PE) contracts for the strike closest to spot among
-        strikes that have BOTH a CE and a PE listed. Returns None if the
-        chain is empty or no strike has both sides."""
+    def strike_pair_at_offset(self, index_id: str, expiry: date, spot: float, offset_steps: int = 0):
+        """Returns (CE, PE) contracts at (nearest-common-strike-to-spot ±
+        offset_steps * strike_interval). offset_steps=0 is plain ATM (both
+        legs at the SAME strike -- a straddle). A non-zero offset widens
+        into a strangle instead: CE at ATM+offset_steps strikes, PE at
+        ATM-offset_steps strikes -- see program_manager.py's
+        _start_new_cycle for why (progressively lowering combined premium/
+        margin when capital is short at ATM; moving a shared straddle
+        strike doesn't reliably do that, since one leg gets more ITM as
+        the other gets more OTM -- widening symmetrically does). Returns
+        None if the chain is empty, no strike has both a CE and a PE
+        listed, the strike interval can't be determined (only matters for
+        a non-zero offset), or the offset strike itself isn't listed on
+        both sides."""
         chain = self.option_chain(index_id, expiry)
         ce_by_strike = {r.strike: r for r in chain if r.opt_type == "CE"}
         pe_by_strike = {r.strike: r for r in chain if r.opt_type == "PE"}
         common_strikes = set(ce_by_strike) & set(pe_by_strike)
         if not common_strikes:
             return None
-        nearest = min(common_strikes, key=lambda s: abs(s - spot))
-        return ce_by_strike[nearest], pe_by_strike[nearest]
+        atm_strike = min(common_strikes, key=lambda s: abs(s - spot))
+        if offset_steps == 0:
+            return ce_by_strike[atm_strike], pe_by_strike[atm_strike]
+        interval = self.strike_interval(index_id, expiry)
+        if not interval:
+            return None
+        ce_strike = round(atm_strike + offset_steps * interval, 2)
+        pe_strike = round(atm_strike - offset_steps * interval, 2)
+        if ce_strike not in ce_by_strike or pe_strike not in pe_by_strike:
+            return None
+        return ce_by_strike[ce_strike], pe_by_strike[pe_strike]
+
+    def atm_pair(self, index_id: str, expiry: date, spot: float):
+        """Returns (CE, PE) contracts for the strike closest to spot among
+        strikes that have BOTH a CE and a PE listed. Returns None if the
+        chain is empty or no strike has both sides. Thin wrapper around
+        strike_pair_at_offset(offset_steps=0) -- kept as its own method
+        since every existing caller already uses this exact signature."""
+        return self.strike_pair_at_offset(index_id, expiry, spot, 0)
 
 
 def load_market_holidays() -> set:

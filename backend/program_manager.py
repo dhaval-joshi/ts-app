@@ -49,6 +49,13 @@ TICK_INTERVAL_SECONDS = 15
 CAPITAL_SIZING_SLIPPAGE_POINTS = 2  # same convention as the New Order page's own capital-based sizing
                                      # (order.js) -- a small buffer against price ticking slightly before
                                      # the entry actually fills, so the order doesn't get sized too tight
+MARGIN_SAFETY_BUFFER = 1.10  # require available margin >= requiredMargin * this, not just >= requiredMargin
+                              # -- the broker's own basket-margin response has zero safety margin baked in
+                              # (its own "shortfall" field is 0 the instant available == required exactly),
+                              # which is too tight for a live cycle to actually enter reliably
+STRANGLE_WIDEN_MAX_STEPS = 3  # if the ATM straddle fails the buffered margin check, retry widened into a
+                                # strangle (CE at ATM+N, PE at ATM-N strikes) for N in 1..this, before giving
+                                # up -- see _start_new_cycle and script_master.strike_pair_at_offset
 
 
 def now_iso() -> str:
@@ -84,6 +91,15 @@ class ProgramManager:
             p.setdefault("logs", [])
             p.setdefault("cycles", [])
             p.setdefault("archived", False)
+            p.setdefault("updated_at", p.get("created_at") or now_iso())  # a Program saved before this field
+                                           # existed just gets "now" once at load time -- affects only its
+                                           # initial sort position in list_programs(), not correctness
+            p.setdefault("alert", None)  # {"message": str, "since": iso timestamp} -- a non-halting,
+                                           # persistent card banner (e.g. "insufficient funds even after
+                                           # widening"); distinct from a halt (runtime.status) since the
+                                           # Program keeps running/retrying. Loose top-level key, not on
+                                           # `runtime`, on purpose -- `runtime` round-trips through
+                                           # ProgramRuntimeState (a strict dataclass) on every tick
             # a Program saved before Scheduling/Paper-Live/capital-sizing existed
             # is missing these keys in its config entirely -- backfill sensible
             # defaults so downstream reads never need defensive None-checks
@@ -178,7 +194,15 @@ class ProgramManager:
     # ---------------------------------------------------------- public API --
 
     def list_programs(self) -> list:
-        return sorted(self._programs.values(), key=lambda p: p["config"]["name"].lower())
+        """Live Programs first, then paper; within each group, most
+        recently updated first. Two-pass STABLE sort (recency first, then
+        mode) rather than one combined key -- sorted()'s stability means
+        the mode pass preserves each group's recency order from the first
+        pass, which is simpler than building one composite sort key that
+        has to invert direction between an ascending grouping and a
+        descending recency field."""
+        by_recency = sorted(self._programs.values(), key=lambda p: p.get("updated_at", ""), reverse=True)
+        return sorted(by_recency, key=lambda p: p["config"]["mode"] != "live")
 
     def get_program(self, program_id: str):
         return self._programs.get(program_id)
@@ -186,7 +210,8 @@ class ProgramManager:
     def create_program(self, config_dict: dict) -> dict:
         cfg = ProgramConfig.from_dict(config_dict)
         rt = sg.ProgramRuntimeState(trading_day=date.today().isoformat())
-        program = {"config": as_dict(cfg), "runtime": dataclasses.asdict(rt), "logs": [], "cycles": [], "archived": False}
+        program = {"config": as_dict(cfg), "runtime": dataclasses.asdict(rt), "logs": [], "cycles": [], "archived": False,
+                    "alert": None, "updated_at": now_iso()}
         self._programs[cfg.program_id] = program
         store.save_program(program)
         return program
@@ -223,6 +248,7 @@ class ProgramManager:
         config_dict["program_id"] = program_id
         cfg = ProgramConfig.from_dict(config_dict)
         existing["config"] = as_dict(cfg)
+        existing["updated_at"] = now_iso()
         store.save_program(existing)
         return existing
 
@@ -295,6 +321,48 @@ class ProgramManager:
         self._log(program, f"Stopped and flattened by user.{' Close requested on open leg(s).' if closed_any else ' No open legs to close.'}")
         return program
 
+    async def close_cycle(self, program_id: str) -> dict:
+        """Closes the CURRENT cycle's open leg(s) at market and lets the
+        Program continue running otherwise -- the explicit action for
+        "I'm happy with this cycle's P&L, close it now" without stopping
+        the Program the way Stop & Flatten does. Deliberately does NOT
+        touch `runtime.status` or `active_cycle_id` here: once both legs
+        actually reach a terminal state, the existing per-tick logic in
+        _tick_one (which already detects "both legs of the active cycle
+        are terminal" every 15s, regardless of WHY they closed) picks this
+        up on its own and runs the normal _close_cycle wrap-up -- P&L,
+        safeguard counters, cycle history -- exactly as it would for an
+        automatic SL/target/time-exit close. A manually-closed cycle's
+        P&L counts toward the daily total and consecutive-loss streak the
+        same as any other cycle's does; there's no special-casing here for
+        "the user chose to close this one," since profit or loss is a real
+        result either way.
+
+        request_close()'s own `reason` parameter already gives this a
+        distinct, visible close_reason ("program_cycle_manual_close") on
+        each leg's order record -- no order_manager.py changes needed for
+        that traceability at all."""
+        program = self._require(program_id)
+        cycle_id = program["runtime"].get("active_cycle_id")
+        if not cycle_id:
+            raise ValueError("no active cycle to close")
+        om = self._order_manager_for(program["config"])
+        closed_any = False
+        for o in om.get_orders_by_cycle(cycle_id):
+            if o["status"] not in ("closed", "cancelled", "entry_rejected"):
+                try:
+                    await om.request_close(o["order_id"], reason="program_cycle_manual_close")
+                    closed_any = True
+                except Exception as e:
+                    log.error("Manual cycle close failed for order %s: %s", o["order_id"], e)
+                    failure_log.log_failure(category="program_cycle_manual_close_failed", order_id=o["order_id"],
+                                             program_id=program_id, message=str(e))
+        detail = ("Close requested on open leg(s) -- the Program will pick up the cycle wrap-up "
+                  "(P&L, safeguard counters) once they resolve, same as any other close.") if closed_any \
+            else "No open legs to close."
+        self._log(program, f"Cycle {cycle_id} manually closed by user. {detail}")
+        return program
+
     def _require(self, program_id: str) -> dict:
         program = self._programs.get(program_id)
         if not program:
@@ -304,7 +372,25 @@ class ProgramManager:
     def _log(self, program: dict, msg: str):
         program.setdefault("logs", []).append({"ts": now_iso(), "msg": msg})
         program["logs"] = program["logs"][-200:]
+        program["updated_at"] = now_iso()  # drives list_programs()'s recency sort -- covers every
+                                             # state-changing action that already goes through _log
+                                             # (halts, cycle start/close, stop/resume/flatten/archive/unarchive)
         store.save_program(program)
+
+    def _set_program_alert(self, program: dict, message: str):
+        """A persistent, visible banner on the Program's card -- e.g.
+        "insufficient funds even after widening" -- distinct from a halt
+        (`runtime.status`): the Program keeps running and retrying on its
+        own on every subsequent tick, this is purely informational so it's
+        never silently invisible. Mirrors order_manager.py's
+        _set_warning/_clear_warning for the same reason."""
+        program["alert"] = {"message": message, "since": now_iso()}
+        store.save_program(program)
+
+    def _clear_program_alert(self, program: dict):
+        if program.get("alert") is not None:
+            program["alert"] = None
+            store.save_program(program)
 
     # -------------------------------------------------------- orchestration --
 
@@ -489,6 +575,80 @@ class ProgramManager:
                             f"Consecutive losses: {state.consecutive_losses}. "
                             f"Today's total: {state.daily_realized_pnl:.2f} ({state.cycles_today} cycle(s)).{status_note}")
 
+    async def _size_legs(self, om, cfg: dict, ce, pe) -> tuple[dict | None, str | None]:
+        """Determines both legs' quantities for a candidate CE/PE pair.
+        Extracted from _start_new_cycle so it can be re-run per strike
+        candidate during the capital-shortfall widening retry (see that
+        method) -- same lots/capital sizing logic as before, unchanged.
+        Returns (leg_qty, None) on success or (None, reason) on failure --
+        never partial (both legs size, or neither does). Deliberately
+        quiet (no logging/failure_log here) -- the caller decides what's
+        worth logging once it knows whether every candidate failed, so a
+        4-candidate widening retry doesn't spam 4x the log/failure entries
+        for what's really one decision."""
+        leg_qty = {}
+        if cfg.get("sizing_mode") == "capital":
+            capital = cfg.get("capital_per_leg") or 0
+            for opt, leg_name in ((ce, "CE"), (pe, "PE")):
+                leg_stream_symbol = f"{opt.exc_token}_NFO"
+                leg_price = await om.fetch_live_price(leg_stream_symbol, timeout=5.0)
+                if leg_price is None:
+                    return None, f"no live price for {leg_name} leg ({opt.id}) to size by capital"
+                effective_price = leg_price + CAPITAL_SIZING_SLIPPAGE_POINTS
+                lots = int(capital / effective_price) // opt.lot if effective_price > 0 else 0
+                if lots < 1:
+                    return None, (f"capital {capital} too small for even 1 lot of {leg_name} "
+                                   f"({opt.lot} qty/lot) at ~{leg_price} + slippage buffer")
+                leg_qty[leg_name] = lots * opt.lot
+        else:
+            leg_qty["CE"] = ce.lot * cfg["lots_per_leg"]
+            leg_qty["PE"] = pe.lot * cfg["lots_per_leg"]
+        return leg_qty, None
+
+    async def _check_buffered_margin(self, om, cfg: dict, ce, pe, leg_qty: dict) -> tuple[bool, str | None]:
+        """LIVE-only basket-margin check (see the hasattr guard at the call
+        site) with an explicit safety buffer on top of the broker's own
+        zero-buffer number: requires available margin to cover
+        requiredMargin * MARGIN_SAFETY_BUFFER, not just requiredMargin
+        exactly -- the broker's own `shortfall` field is 0 the instant
+        available == required exactly, which is too tight to reliably
+        enter a live cycle.
+
+        An API call that raises (network error/timeout) deliberately does
+        NOT block the cycle -- same as before this change -- an extra
+        check failing shouldn't become a new point of failure preventing
+        an otherwise-valid trade, when the existing rejection-handling
+        already covers that case at the broker's own place-order step.
+
+        A call that SUCCEEDS but returns missing/malformed margin fields
+        is a DIFFERENT failure mode from that (a real response that can't
+        be trusted, not an absent one) -- gets its own warning rather than
+        silently defaulting both sides to 0 and passing through as "fine"."""
+        basket = [
+            {"symId": ce.id, "qty": leg_qty["CE"], "side": "buy", "type": "market", "product": cfg["product"]},
+            {"symId": pe.id, "qty": leg_qty["PE"], "side": "buy", "type": "market", "product": cfg["product"]},
+        ]
+        try:
+            margin_resp = await om.client.get_basket_margin(basket)
+        except Exception as e:
+            log.warning("Margin pre-check failed for Program %s (proceeding anyway -- a failed "
+                        "check itself shouldn't block an otherwise-valid trade): %s", cfg["name"], e)
+            return True, None
+        margin_data = margin_resp.get("d") or {}
+        available = margin_data.get("availableMargin")
+        required = margin_data.get("requiredMargin")
+        if available is None or required is None:
+            log.warning("Margin pre-check for Program %s returned an unexpected shape (missing "
+                        "availableMargin/requiredMargin) -- proceeding anyway, but this response "
+                        "couldn't actually be verified: %s", cfg["name"], margin_data)
+            return True, None
+        buffered_required = required * MARGIN_SAFETY_BUFFER
+        if available < buffered_required:
+            buffer_pct = int(round((MARGIN_SAFETY_BUFFER - 1) * 100))
+            return False, (f"margin shortfall with {buffer_pct}% buffer -- available ~₹{available:.2f}, "
+                            f"need ~₹{buffered_required:.2f} (₹{required:.2f} required + buffer)")
+        return True, None
+
     async def _start_new_cycle(self, program: dict, now: datetime):
         cfg = program["config"]
         om = self._order_manager_for(cfg)
@@ -517,84 +677,69 @@ class ProgramManager:
                                 f"working day(s) out was found in the option chain.")
             return
 
-        pair = self.script_master.atm_pair(cfg["index_id"], expiry, spot)
-        if not pair:
+        atm_pair = self.script_master.atm_pair(cfg["index_id"], expiry, spot)
+        if not atm_pair:
             self._log(program, f"Can't start a cycle: no strike near spot {spot} has both a CE and a PE "
                                 f"listed for expiry {expiry}.")
             return
-        ce, pe = pair
+
+        # Determine BOTH legs' quantities -- and, for LIVE Programs, verify
+        # (with a 10% safety buffer) there's enough margin for BOTH legs
+        # together -- BEFORE ever placing either. A half-placed straddle
+        # would defeat the whole premise of the strategy, so nothing here
+        # ever places one leg without the other.
+        #
+        # If the plain ATM straddle doesn't clear the buffered margin
+        # check, retry progressively WIDENED into a strangle (CE at
+        # ATM+N, PE at ATM-N strikes, N=1..STRANGLE_WIDEN_MAX_STEPS)
+        # instead of just giving up -- widening symmetrically is what
+        # reliably lowers combined premium/margin; shifting a shared
+        # straddle strike doesn't (one leg gets more ITM as the other
+        # gets more OTM, so the net effect on combined cost is ambiguous).
+        # Paper Programs never widen and never margin-check at all
+        # (PaperBrokerClient has no get_basket_margin -- paper mode
+        # deliberately assumes capital is always available by design).
+        is_live = hasattr(om.client, "get_basket_margin")
+        offsets_to_try = range(0, STRANGLE_WIDEN_MAX_STEPS + 1) if is_live else (0,)
+        chosen = None
+        last_reason = None
+        for offset in offsets_to_try:
+            candidate_pair = self.script_master.strike_pair_at_offset(cfg["index_id"], expiry, spot, offset)
+            if not candidate_pair:
+                last_reason = f"no strike pair at offset {offset} strike(s) from ATM"
+                continue
+            c_ce, c_pe = candidate_pair
+            leg_qty, size_reason = await self._size_legs(om, cfg, c_ce, c_pe)
+            if leg_qty is None:
+                last_reason = size_reason
+                continue
+            if is_live:
+                ok, margin_reason = await self._check_buffered_margin(om, cfg, c_ce, c_pe, leg_qty)
+                if not ok:
+                    last_reason = margin_reason
+                    continue
+            chosen = (c_ce, c_pe, leg_qty, offset)
+            break
+
+        if chosen is None:
+            atm_ce, atm_pe = atm_pair
+            widen_bit = f" even after widening into a strangle up to {STRANGLE_WIDEN_MAX_STEPS} strikes" if is_live else ""
+            self._set_program_alert(program, f"Insufficient funds to start a cycle -- ATM strike "
+                                              f"{atm_ce.strike} failed{widen_bit}. Add capital; this Program "
+                                              f"will keep retrying automatically. ({last_reason})")
+            self._log(program, f"Can't start a cycle: {last_reason}. Reporting ATM strike {atm_ce.strike} "
+                                f"-- {atm_ce.id} + {atm_pe.id} -- and skipping this cycle (will retry next tick).")
+            failure_log.log_failure(category="program_capital_insufficient", order_id=None,
+                                     program_id=cfg["program_id"], message=f"Program {cfg['name']}: {last_reason}")
+            return
+
+        ce, pe, leg_qty, offset = chosen
+        self._clear_program_alert(program)
 
         cycle_id = uuid.uuid4().hex[:12]
+        widen_note = f" (WIDENED to a strangle at offset {offset} -- the ATM straddle was insufficient)" if offset else ""
         self._log(program, f"Starting cycle {cycle_id}: spot {spot}, expiry {expiry}, "
-                            f"ATM strike {ce.strike} -- {ce.id} + {pe.id}.")
-
-        # Determine BOTH legs' quantities BEFORE placing anything. For
-        # capital sizing specifically, both legs' prices must be knowable
-        # up front so neither leg is ever placed without the other -- a
-        # half-placed straddle would defeat the whole premise of the
-        # strategy. "Equal capital, not equal lots" was a deliberate
-        # choice over the simpler equal-lots rule: it gives predictable
-        # SL risk on both sides regardless of which leg is more expensive
-        # that day, at the cost of not being strictly delta-neutral.
-        leg_qty = {}
-        if cfg.get("sizing_mode") == "capital":
-            capital = cfg.get("capital_per_leg") or 0
-            for opt, leg_name in ((ce, "CE"), (pe, "PE")):
-                leg_stream_symbol = f"{opt.exc_token}_NFO"
-                leg_price = await om.fetch_live_price(leg_stream_symbol, timeout=5.0)
-                if leg_price is None:
-                    self._log(program, f"Can't start a cycle: no live price for {leg_name} leg ({opt.id}) "
-                                        f"to size by capital -- aborting this cycle attempt (not placing "
-                                        f"the other leg either), will retry next tick.")
-                    failure_log.log_failure(category="program_leg_price_fetch_failed", order_id=None,
-                                             program_id=cfg["program_id"],
-                                             message=f"Program {cfg['name']}: {leg_name} leg price fetch "
-                                                     f"timed out for capital sizing")
-                    return
-                effective_price = leg_price + CAPITAL_SIZING_SLIPPAGE_POINTS
-                lots = int(capital / effective_price) // opt.lot if effective_price > 0 else 0
-                if lots < 1:
-                    self._log(program, f"Can't start a cycle: capital {capital} too small for even 1 lot "
-                                        f"of {leg_name} ({opt.lot} qty/lot) at ~{leg_price} + slippage buffer.")
-                    return
-                leg_qty[leg_name] = lots * opt.lot
-        else:
-            leg_qty["CE"] = ce.lot * cfg["lots_per_leg"]
-            leg_qty["PE"] = pe.lot * cfg["lots_per_leg"]
-
-        # Margin pre-check -- tied to THIS Program's own broker specifically
-        # (via a capability check on om.client, not a portfolio-wide check),
-        # per the explicit design call: each Program's margin reality is
-        # whatever ITS OWN broker says, not some aggregate across everything
-        # running. Only ever applies to live Programs -- PaperBrokerClient
-        # has no get_basket_margin method at all, so paper Programs skip
-        # this automatically with no special-casing on `mode` needed. A
-        # FAILED check (API error/timeout) deliberately does NOT block the
-        # cycle -- only a check that SUCCEEDS and clearly reports a
-        # shortfall does; an extra API call failing shouldn't become a new
-        # point of failure preventing an otherwise-valid trade, when the
-        # existing rejection-handling already covers that case at the
-        # broker's own place-order step.
-        if hasattr(om.client, "get_basket_margin"):
-            basket = [
-                {"symId": ce.id, "qty": leg_qty["CE"], "side": "buy", "type": "market", "product": cfg["product"]},
-                {"symId": pe.id, "qty": leg_qty["PE"], "side": "buy", "type": "market", "product": cfg["product"]},
-            ]
-            try:
-                margin_resp = await om.client.get_basket_margin(basket)
-                margin_data = margin_resp.get("d") or {}
-                shortfall = margin_data.get("shortfall") or 0
-                if shortfall > 0:
-                    self._log(program, f"Can't start a cycle: margin shortfall of ~₹{shortfall:.2f} "
-                                        f"(available ~₹{margin_data.get('availableMargin')}, "
-                                        f"required ~₹{margin_data.get('requiredMargin')} for both legs).")
-                    failure_log.log_failure(category="program_margin_shortfall", order_id=None,
-                                             program_id=cfg["program_id"],
-                                             message=f"Program {cfg['name']}: margin shortfall ~₹{shortfall:.2f}")
-                    return
-            except Exception as e:
-                log.warning("Margin pre-check failed for Program %s (proceeding anyway -- a failed "
-                            "check itself shouldn't block an otherwise-valid trade): %s", cfg["name"], e)
+                            f"strike {ce.strike}/{pe.strike} -- {ce.id} + {pe.id}{widen_note}.")
 
         for opt, leg_name in ((ce, "CE"), (pe, "PE")):
             req = SimpleNamespace(
@@ -608,6 +753,8 @@ class ProgramManager:
             leg_strategy = {
                 "product": cfg["product"], "tick_size": opt.tick or 0.05,
                 "stop": cfg["stop"], "target": cfg["target"], "time_exit": cfg["time_exit"],
+                "trail_check_interval_seconds": cfg.get("trail_check_interval_seconds", 0),
+                "exit_confirmation_windows": cfg.get("exit_confirmation_windows", 1),
             }
             try:
                 order = await om.create_and_place_order_with_strategy(

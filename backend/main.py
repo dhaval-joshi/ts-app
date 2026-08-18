@@ -500,6 +500,17 @@ async def api_flatten_program(request):
     return JSONResponse(program)
 
 
+async def api_close_cycle(request):
+    try:
+        program = await programs.close_cycle(request.path_params["program_id"])
+    except ValueError as e:
+        # can raise for two different reasons (program not found, or no active cycle) --
+        # same "just use 400 uniformly" convention api_delete_program already uses below
+        # for the same two-different-ValueError-reasons shape
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    return JSONResponse(program)
+
+
 async def api_archive_program(request):
     try:
         program = programs.archive_program(request.path_params["program_id"])
@@ -708,6 +719,7 @@ routes = [
     Route("/api/programs/{program_id}/stop", api_stop_program, methods=["POST"]),
     Route("/api/programs/{program_id}/resume", api_resume_program, methods=["POST"]),
     Route("/api/programs/{program_id}/flatten", api_flatten_program, methods=["POST"]),
+    Route("/api/programs/{program_id}/close-cycle", api_close_cycle, methods=["POST"]),
     Route("/api/programs/{program_id}/archive", api_archive_program, methods=["POST"]),
     Route("/api/programs/{program_id}/unarchive", api_unarchive_program, methods=["POST"]),
     Route("/api/risk-groups", api_list_risk_groups, methods=["GET"]),

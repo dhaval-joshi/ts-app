@@ -7,7 +7,13 @@ The brain of the app. Owns the lifecycle of every order:
      no broker order is placed for the exit at all (OCO is fully retired;
      see the "Historical" section in the README for why)
   4. on every L1 tick: ratchet the trigger price if trailing is on, then
-     check if price has crossed the current trigger
+     check if price has crossed the current trigger -- by default this
+     evaluates on every raw tick, but a Strategy/Program can configure
+     trail_check_interval_seconds to only re-evaluate every N seconds
+     using the window's MEDIAN tick (smooths single-tick noise in a
+     choppy market), and a Program can additionally require
+     exit_confirmation_windows consecutive crossed evaluations before
+     actually firing -- see handle_l1_tick
   5. trigger crossed (or a time-based exit is due): fire a plain market
      order to close, the same reliable mechanism everywhere else in this
      app uses (Stop & Flatten, manual close)
@@ -31,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import statistics
 import time
 import uuid
 from datetime import datetime, date, time as dtime
@@ -126,6 +133,24 @@ class OrderManager:
                                                        # ever ticked (not just tracked watching orders) --
                                                        # used by PaperBrokerClient for synchronous, non-blocking
                                                        # fill checks; see get_cached_price() below
+        self._background_close_tasks: set[asyncio.Task] = set()  # strong references for the fire-and-forget
+                                                       # _do_close() tasks spawned by _spawn_close() -- asyncio
+                                                       # only holds a create_task() result weakly, so without
+                                                       # this the task could be garbage-collected mid-flight,
+                                                       # silently abandoning a close the order was already
+                                                       # committed to (status already flipped to "closing")
+        self._trail_state: dict[str, dict] = {}  # order_id -> in-memory-only state for timeframe-aggregated
+                                                       # trailing/exit checks (trail_check_interval_seconds)
+                                                       # and exit confirmation (exit_confirmation_windows) --
+                                                       # {"window_start": monotonic float | None,
+                                                       #  "window_ticks": [float, ...],
+                                                       #  "stop_confirm_streak": int, "target_confirm_streak": int}.
+                                                       # Deliberately NOT persisted (same reasoning as
+                                                       # _latest_prices -- this is display/decision-cadence
+                                                       # state, not something that needs to survive a restart;
+                                                       # losing it mid-window just means the next window starts
+                                                       # fresh, which is harmless). See handle_l1_tick and
+                                                       # _maybe_app_market_exit.
 
     # ------------------------------------------------------------ boot ---
 
@@ -153,6 +178,8 @@ class OrderManager:
         o.setdefault("program_id", None)
         o.setdefault("cycle_id", None)
         o.setdefault("program_leg", None)
+        o.setdefault("trail_check_interval_seconds", 0)  # 0 = no aggregation, today's exact behavior
+        o.setdefault("exit_confirmation_windows", 1)      # 1 = fire on first crossing, today's exact behavior
         return o
 
     def _load_orders_safely(self, loader) -> list[dict]:
@@ -369,6 +396,13 @@ class OrderManager:
             "program_id": (program_tag or {}).get("program_id"),  # non-None only for an Advanced OMS leg
             "cycle_id": (program_tag or {}).get("cycle_id"),
             "program_leg": (program_tag or {}).get("leg"),         # "CE" | "PE" | None
+            "trail_check_interval_seconds": strategy.get("trail_check_interval_seconds", 0) or 0,  # copied
+                # from the resolved Strategy (Regular OMS) or the Program's own leg_strategy dict, same
+                # pattern as tick_size/time_exit above -- 0 (absent for a plain Strategy dict, or an
+                # explicit 0) means no aggregation, today's exact per-tick behavior
+            "exit_confirmation_windows": strategy.get("exit_confirmation_windows", 1) or 1,  # Program-only
+                # field -- a plain Strategy dict never has this key, so Regular OMS orders always get the
+                # default of 1 (fire on first crossing, unchanged from before this feature)
             "logs": [],
         }
 
@@ -501,10 +535,55 @@ class OrderManager:
             # position that genuinely got flattened -- record the right terminal state
             order["status"] = "closed" if filled else "cancelled"
             order["warning"] = None  # terminal -- nothing left to warn about
+            self._trail_state.pop(order["order_id"], None)  # terminal -- no more evaluations coming
             self._log(order, "Nothing left to square off; marking " + order["status"] + ".")
 
         store.save_order(order)
         self._resubscribe_live_price_symbols()
+
+    def _spawn_close(self, order: dict):
+        """Fires _do_close() as a background task instead of awaiting it
+        inline -- used ONLY by _maybe_app_market_exit (the tick-triggered
+        exit path), which runs on the single shared stream-consumer task
+        that EVERY order/symbol's live ticks funnel through (see
+        main.py's _stream_consumer_loop). Awaiting _do_close() there
+        inline would block that one shared task on this order's real
+        broker round-trip (cancel/place, each subject to the REST
+        client's own timeout) -- with more than one order/Program
+        active, that stalls trailing AND exit-trigger checks for EVERY
+        OTHER order until this one's close resolves. That was the root
+        cause of the "multiple Programs eventually freeze" bug.
+
+        Safe to background: order["status"] is already flipped to
+        "closing" synchronously, before this is called, with no `await`
+        in between -- so a later tick for this same order is filtered
+        out by the "status != watching" guard in handle_l1_tick's loop
+        regardless of whether this background task has even started
+        running yet, so it can't double-fire a second close.
+
+        request_close() (manual close, REST-driven) and
+        _check_time_exits() (runs on the separate reconcile_loop task)
+        both still AWAIT _do_close() directly -- neither of them runs on
+        the shared stream-consumer task, and request_close()'s REST
+        caller needs the synchronous result to report success/failure."""
+        task = asyncio.create_task(self._do_close(order))
+        self._background_close_tasks.add(task)
+        task.add_done_callback(lambda t, o=order: self._on_close_task_done(t, o))
+
+    def _on_close_task_done(self, task: asyncio.Task, order: dict):
+        self._background_close_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # _do_close() already catches TradejiniApiError internally (logs it
+            # on the order, sets a warning) -- reaching here means a genuine
+            # bug, not an expected broker failure, so it needs to be loud
+            # rather than vanishing as an "exception was never retrieved"
+            # warning nobody sees
+            log.exception("Background close task failed unexpectedly for order %s", order.get("order_id"), exc_info=exc)
+            failure_log.log_failure(category="app_market_exit_background_failed", order_id=order.get("order_id"),
+                                     program_id=order.get("program_id"), message=f"Background _do_close task raised: {exc}")
 
     # -------------------------------------------------------- reconcile
 
@@ -570,6 +649,7 @@ class OrderManager:
             return True
         elif bo.get("status") in ("rejected", "cancelled"):
             order["status"] = "entry_rejected" if bo.get("status") == "rejected" else "cancelled"
+            self._trail_state.pop(order["order_id"], None)  # terminal -- no more evaluations coming
             self._log(order, f"Entry order ended: {bo.get('status')} ({bo.get('reason', '')}).")
             store.save_order(order)
             return True
@@ -595,6 +675,7 @@ class OrderManager:
             order["status"] = "closed"
             order["pnl"]["source"] = "broker order record (exact, square-off)"
             order["warning"] = None  # position is closed -- nothing left to warn about
+            self._trail_state.pop(order["order_id"], None)  # terminal -- no more evaluations coming
             self._finalize_realized_pnl(order, bo.get("avgPrice"))
             self._log(order, f"Square-off filled at {bo.get('avgPrice')} -- position closed. "
                               f"P&L: {order['pnl']['realized']}.")
@@ -721,21 +802,54 @@ class OrderManager:
         for order in self._orders.values():
             if order["status"] != "watching" or order.get("stream_symbol") != symbol:
                 continue
-            self._update_live_pnl(order, ltp)
-            if order["stop"]["trailing"]["enabled"] or order["target"]["trailing"]["enabled"]:
-                await self._maybe_trail(order, ltp)
-            await self._maybe_app_market_exit(order, ltp)
+            self._update_live_pnl(order, ltp)  # unconditional, every raw tick -- display accuracy is a
+                                                  # separate concern from trailing/exit DECISION cadence below
+
+            interval = order.get("trail_check_interval_seconds") or 0
+            if interval <= 0:
+                # today's exact behavior when aggregation isn't configured -- react to every raw tick,
+                # no window state touched at all (zero new state/cost for the common, unconfigured case)
+                eval_price, run_eval = ltp, True
+            else:
+                state = self._trail_state.setdefault(order["order_id"], {"window_start": None, "window_ticks": []})
+                now = time.monotonic()
+                if state["window_start"] is None:
+                    state["window_start"] = now
+                state["window_ticks"].append(ltp)
+                if now - state["window_start"] >= interval:
+                    # window closes on THIS tick -- decide using the MEDIAN of every tick seen during
+                    # the window (not just this closing tick), which is what actually smooths out a
+                    # single noisy/spike tick rather than merely sampling less often. Then reset for
+                    # the next window, which starts fresh on the next tick that arrives.
+                    eval_price = statistics.median(state["window_ticks"])
+                    run_eval = True
+                    state["window_start"] = None
+                    state["window_ticks"] = []
+                else:
+                    eval_price, run_eval = None, False
+
+            if run_eval:
+                if order["stop"]["trailing"]["enabled"] or order["target"]["trailing"]["enabled"]:
+                    await self._maybe_trail(order, eval_price)
+                await self._maybe_app_market_exit(order, eval_price)
 
     async def _maybe_app_market_exit(self, order: dict, ltp: float):
         """Watches live price directly -- no broker-side conditional order
-        exists for any order at all -- and, the moment it crosses the stop
-        or target trigger, fires the exact same reliable plain-market-order
-        close already used by Stop & Flatten, manual close, and time-based
-        exits (_do_close). Called every tick; guarded by
-        order["status"] != "watching" in the loop above once this fires
-        (status flips to "closing" synchronously, before the await below),
-        so it can't double-fire on a later tick that arrives while
-        _do_close is still in flight."""
+        exists for any order at all -- and, once the stop or target trigger
+        is crossed (and confirmed, if exit_confirmation_windows > 1 -- see
+        below), fires the exact same reliable plain-market-order close
+        already used by Stop & Flatten, manual close, and time-based exits
+        (_do_close). `ltp` here is whatever handle_l1_tick decided to
+        evaluate against the trigger -- the raw tick when no aggregation is
+        configured, or the current window's MEDIAN tick otherwise; either
+        way this function doesn't care which, it just compares a price to a
+        trigger. Called once per evaluation (see handle_l1_tick); guarded
+        by order["status"] != "watching" in that loop once this fires
+        (status flips to "closing" synchronously, before _do_close is even
+        spawned below), so it can't double-fire on a later evaluation that
+        arrives while _do_close is still running -- see _spawn_close's
+        docstring for why the close is backgrounded rather than awaited
+        directly here."""
         mode = order.get("exit_mode", "both")
         if mode == "none":
             return
@@ -750,19 +864,35 @@ class OrderManager:
             stop_hit = stop_trig is not None and ltp >= stop_trig
             target_hit = target_trig is not None and ltp <= target_trig
 
+        # exit_confirmation_windows (Program-only; defaults to 1 for every Regular OMS order and any
+        # Program that doesn't set it) -- a crossed trigger must stay crossed for this many CONSECUTIVE
+        # evaluations (one evaluation = one raw tick if trail_check_interval_seconds is 0, or one
+        # aggregation window close otherwise) before actually firing, instead of firing the instant a
+        # single evaluation crosses it. Guards on confirm_n > 1 so the default case never touches
+        # self._trail_state at all.
+        confirm_n = order.get("exit_confirmation_windows") or 1
+        if confirm_n > 1:
+            state = self._trail_state.setdefault(order["order_id"], {})
+            state["stop_confirm_streak"] = state.get("stop_confirm_streak", 0) + 1 if stop_hit else 0
+            state["target_confirm_streak"] = state.get("target_confirm_streak", 0) + 1 if target_hit else 0
+            stop_hit = stop_hit and state["stop_confirm_streak"] >= confirm_n
+            target_hit = target_hit and state["target_confirm_streak"] >= confirm_n
+
         if not (stop_hit or target_hit):
             return
         # if a large gap somehow crosses both in the same tick, protecting
         # capital wins over capturing extra profit
         reason = "stop" if stop_hit else "target"
         trig_value = stop_trig if stop_hit else target_trig
-        self._log(order, f"Live price {ltp} crossed the {reason} trigger ({trig_value}) -- firing a "
+        confirm_note = f" (confirmed over {confirm_n} consecutive evaluations)" if confirm_n > 1 else ""
+        self._log(order, f"Price {ltp} crossed the {reason} trigger ({trig_value}){confirm_note} -- firing a "
                           f"market order to close now.")
         order["status"] = "closing"
         order["close_reason"] = f"{reason}_hit"
         order["closing_since"] = now_iso()
         store.save_order(order)
-        await self._do_close(order)
+        self._spawn_close(order)  # backgrounded, not awaited -- see _spawn_close's docstring for why
+                                    # this specific call site must never block the shared stream-consumer task
 
     def get_cached_price(self, stream_symbol: str) -> float | None:
         """The most recent tick seen for this symbol, if any -- synchronous

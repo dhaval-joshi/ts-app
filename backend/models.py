@@ -131,6 +131,15 @@ class StrategyConfig:
         trailing=TrailingConfig(enabled=True, trail_by=2.0, activation_offset=0.0),
     ))
     time_exit: TimeExitConfig = field(default_factory=TimeExitConfig)
+    trail_check_interval_seconds: int = 0  # 0 = no aggregation, react to every raw tick (today's exact
+                                             # behavior). > 0 = only re-evaluate trailing/exit-trigger every
+                                             # this many seconds, using the MEDIAN of ticks seen during that
+                                             # window rather than the raw tick -- smooths out single-tick
+                                             # noise/spikes in a choppy market. Live P&L display still updates
+                                             # on every tick regardless -- this only affects the trailing/exit
+                                             # DECISION, never execution (a crossed trigger still fires a
+                                             # plain market order, same as always). See order_manager.py's
+                                             # handle_l1_tick.
     # NOTE: there used to be a configurable exit_mechanism field here
     # ("broker" real-OCO vs "app_market" app-watched), and before that,
     # broker-side OCO/stop/target orders were the ONLY mechanism at all.
@@ -150,6 +159,9 @@ class StrategyConfig:
         tick_size = float(d.get("tick_size") or 0.05)
         if tick_size <= 0:
             raise ValidationError("tick_size must be greater than 0")
+        trail_check_interval_seconds = int(d.get("trail_check_interval_seconds") or 0)
+        if trail_check_interval_seconds < 0:
+            raise ValidationError("trail_check_interval_seconds must be >= 0")
         # editing an existing strategy sends its id back so the save
         # overwrites the SAME file (a true rename) instead of creating a
         # new one under the new name -- generate a fresh one only when
@@ -166,6 +178,7 @@ class StrategyConfig:
             target=LegStrategyConfig.from_dict(d.get("target"), default_trig_offset=2.0,
                                                 default_trailing_enabled=True, default_trail_by=2.0),
             time_exit=TimeExitConfig.from_dict(d.get("time_exit")),
+            trail_check_interval_seconds=trail_check_interval_seconds,
         )
 
 
@@ -281,6 +294,21 @@ class ProgramConfig:
         # which only governs STARTING a new cycle, not closing one already open
     safeguards: SafeguardsConfig = field(default_factory=SafeguardsConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    trail_check_interval_seconds: int = 0  # same meaning as StrategyConfig's field of the same name --
+                                             # 0 = react to every raw tick (today's behavior); > 0 = only
+                                             # re-evaluate trailing/exit-trigger every this many seconds,
+                                             # using the MEDIAN tick seen during that window. Deliberately a
+                                             # top-level field here, not on `schedule` (ScheduleConfig is
+                                             # strictly about cycle-START eligibility -- a different concern
+                                             # from exit-check cadence, which is closer in kind to stop/
+                                             # target/time_exit above).
+    exit_confirmation_windows: int = 1  # a crossed stop/target trigger must stay crossed for this many
+                                          # CONSECUTIVE evaluations (each evaluation being either one raw
+                                          # tick, if trail_check_interval_seconds is 0, or one aggregation
+                                          # window close) before the close actually fires -- 1 = fire on the
+                                          # first crossing (today's exact behavior). Program-only (not on
+                                          # StrategyConfig) per the person's explicit choice: Regular OMS
+                                          # orders always fire immediately, same as before this feature.
     # NOTE: exit_mechanism used to be configurable here too -- retired for
     # the same reason as StrategyConfig's (see that field's removal note
     # above).
@@ -316,6 +344,12 @@ class ProgramConfig:
             capital_per_leg = float(capital_per_leg)
         else:
             capital_per_leg = float(capital_per_leg) if capital_per_leg not in (None, "") else None
+        trail_check_interval_seconds = int(d.get("trail_check_interval_seconds") or 0)
+        if trail_check_interval_seconds < 0:
+            raise ValidationError("trail_check_interval_seconds must be >= 0")
+        exit_confirmation_windows = int(d.get("exit_confirmation_windows") or 1)
+        if exit_confirmation_windows < 1:
+            raise ValidationError("exit_confirmation_windows must be >= 1")
 
         return cls(
             program_id=program_id,
@@ -337,6 +371,8 @@ class ProgramConfig:
             }),
             safeguards=SafeguardsConfig.from_dict(d.get("safeguards")),
             schedule=ScheduleConfig.from_dict(d.get("schedule")),
+            trail_check_interval_seconds=trail_check_interval_seconds,
+            exit_confirmation_windows=exit_confirmation_windows,
         )
 
 

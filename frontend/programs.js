@@ -149,6 +149,7 @@ function activeLegsInnerHtml(activeLegs) {
           <div class="border border-slate-200 rounded-[0.3rem] p-2.5">
             <div class="text-xs font-medium text-slate-900">${o.program_leg} — ${o.sym_id}</div>
             <div class="text-xs text-slate-400">${STATUS_LABEL[o.status] || o.status} · entry ${fmt(o.entry.avg_price)}</div>
+            ${o.status === "watching" && o.last_ltp != null ? `<div class="text-xs text-slate-400">Live price ${fmt(o.last_ltp)}</div>` : ""}
             <div class="text-xs font-medium ${pnlCls} mt-0.5">${pnlText}</div>
             <div class="text-[11px] text-slate-400 mt-1">SL ${fmt(o.stop && o.stop.current_trig_price)} · Target ${fmt(o.target && o.target.current_trig_price)} <span class="text-slate-300">(live, in-memory)</span></div>
           </div>`;
@@ -183,6 +184,19 @@ function programCardHtml(program, allOrders, opts = {}) {
     ? `<div class="text-xs text-amber-600 mt-1">Cooling down until ${rt.cooldown_until.replace("T", " ")} (max cycles/day throttle).</div>`
     : "";
 
+  // Non-halting alert (e.g. insufficient capital even after widening) -- the
+  // Program keeps running/retrying on its own; this is purely informational
+  // so it's never silently invisible. Amber, not red, since nothing is halted.
+  const alertBanner = program.alert
+    ? `<div class="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3.5 shadow-sm">
+         <div class="flex items-center gap-2 text-amber-700 font-medium text-sm">
+           <span class="material-symbols-outlined !text-lg">warning</span>Alert
+         </div>
+         <div class="text-amber-700 text-xs mt-1">${program.alert.message}
+           <span class="text-amber-500">(since ${program.alert.since.replace("T", " ")})</span></div>
+       </div>`
+    : "";
+
   const activeLegsHtml = `<div id="active-legs-${cfg.program_id}">${activeLegsInnerHtml(activeLegs)}</div>`;
 
   return `
@@ -202,6 +216,7 @@ function programCardHtml(program, allOrders, opts = {}) {
     </div>
 
     ${haltBanner}
+    ${alertBanner}
     ${cooldownNote}
 
     <div class="grid grid-cols-4 gap-3 mt-4">
@@ -220,6 +235,9 @@ function programCardHtml(program, allOrders, opts = {}) {
       ${isHalted || isStopped
         ? `<button type="button" onclick="resumeProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-bg-600 text-white shadow-sm"><span class="material-symbols-outlined !text-base">play_arrow</span>Resume</button>`
         : `<button type="button" onclick="stopProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">pause</span>Stop</button>`}
+      ${rt.active_cycle_id
+        ? `<button type="button" onclick="closeCycle('${cfg.program_id}')" title="Close just this cycle's open leg(s); the Program keeps running and will start a new cycle normally" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">task_alt</span>Close Cycle</button>`
+        : ""}
       <button type="button" onclick="flattenProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-red-600 text-white shadow-sm hover:bg-red-700"><span class="material-symbols-outlined !text-base">stop_circle</span>Stop &amp; Flatten</button>
       <button type="button" onclick="archiveProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">archive</span>Archive</button>
       <button type="button" onclick="editProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">edit</span>Edit</button>
@@ -258,6 +276,17 @@ async function resumeProgram(id) {
     loadAdvancedOms();
   } catch (e) {
     toast("Failed to resume: " + e.message, "error");
+  }
+}
+
+async function closeCycle(id) {
+  if (!confirm("Close this cycle's open leg(s) now at market? The Program keeps running and will start a new cycle normally once this one wraps up.")) return;
+  try {
+    await api(`/api/programs/${id}/close-cycle`, { method: "POST" });
+    toast("Cycle close requested.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to close cycle: " + e.message, "error");
   }
 }
 
@@ -310,6 +339,48 @@ function closeProgramDialog() {
   document.getElementById("programDialogRoot").classList.remove("show");
 }
 
+// Preset choices for the timeframe-aggregation interval, shared by the select's
+// option list and the reverse-mapping (stored seconds -> matching preset, or
+// "custom") done when a form opens for editing. 0 means "Off -- every tick".
+const TRAIL_INTERVAL_PRESETS = [
+  { value: 0, label: "Off -- every tick (default)" },
+  { value: 5, label: "5 seconds" },
+  { value: 10, label: "10 seconds" },
+  { value: 30, label: "30 seconds" },
+  { value: 60, label: "1 minute" },
+  { value: 180, label: "3 minutes" },
+  { value: 300, label: "5 minutes" },
+];
+
+function trailIntervalFieldHtml(currentInterval, idPrefix) {
+  // Reverse-maps a stored seconds value back to its matching preset option, or
+  // falls through to "custom" pre-filled with that value if it doesn't match any
+  // preset exactly (e.g. a stored 45 must show "Custom: 45", not silently snap
+  // to "30" or "60").
+  const isCustom = !TRAIL_INTERVAL_PRESETS.some((p) => p.value === currentInterval);
+  const options = TRAIL_INTERVAL_PRESETS.map(
+    (p) => `<option value="${p.value}" ${!isCustom && currentInterval === p.value ? "selected" : ""}>${p.label}</option>`
+  ).join("");
+  return `
+    <div>
+      <label class="field-label">Re-evaluation interval</label>
+      <select name="trail_check_interval_preset" id="${idPrefix}TrailIntervalPreset" class="js-enhance-select field-input"
+        onchange="document.getElementById('${idPrefix}TrailIntervalCustomField').classList.toggle('hidden', this.value !== 'custom')">
+        ${options}
+        <option value="custom" ${isCustom ? "selected" : ""}>Custom...</option>
+      </select>
+    </div>
+    <div id="${idPrefix}TrailIntervalCustomField" class="${isCustom ? "" : "hidden"}">
+      <label class="field-label">Custom interval (seconds)</label>
+      <input name="trail_check_interval_custom" type="number" min="1" step="1" value="${isCustom ? currentInterval : ""}" class="field-input" />
+    </div>`;
+}
+
+function readTrailIntervalFromForm(fd) {
+  const preset = fd.get("trail_check_interval_preset");
+  return preset === "custom" ? (num(fd.get("trail_check_interval_custom")) || 0) : (num(preset) || 0);
+}
+
 function programFormHtml(p) {
   const cfg = p ? p.config : {
     name: "", index_id: "", risk_group_id: null, product: "intraday", mode: "live",
@@ -319,6 +390,7 @@ function programFormHtml(p) {
     time_exit: { mode: "intraday_window", window_start: "15:10", window_end: "15:15", at: null },
     safeguards: { consecutive_loss_limit: 3, daily_loss_amount: 5000, max_cycles_per_day: 5, cooldown_minutes: 5 },
     schedule: { continuous: false, start_time: "09:15", end_time: "14:55", days: "all", inter_cycle_delay_seconds: 0 },
+    trail_check_interval_seconds: 0, exit_confirmation_windows: 1,
   };
   const indexOptions = indicesCache.map((i) => `<option value="${i.index_id}" ${i.index_id === cfg.index_id ? "selected" : ""}>${i.disp_name}</option>`).join("");
   const riskGroupOptions = allRiskGroups.map((g) => `<option value="${g.risk_group_id}" ${g.risk_group_id === cfg.risk_group_id ? "selected" : ""}>${g.name}</option>`).join("");
@@ -467,6 +539,19 @@ function programFormHtml(p) {
       <p class="text-xs text-slate-400 mt-2">Inter-cycle delay: how long to wait after a cycle closes before considering a new one. 0 = immediate re-entry.</p>
     </fieldset>
 
+    <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Timeframe aggregation &amp; exit confirmation</legend>
+      <p class="text-xs text-slate-400 mb-3">Reduces sensitivity to single-tick noise in a choppy market: trailing and the stop/target check re-evaluate on this cadence instead of every raw tick, using the MEDIAN price seen during the window rather than one noisy instant tick. This only changes the DECISION, never execution -- a confirmed trigger still fires a plain market order, same as always. Off (0) = react to every tick, today's exact behavior.</p>
+      <div class="grid sm:grid-cols-2 gap-4">
+        ${trailIntervalFieldHtml(cfg.trail_check_interval_seconds || 0, "program")}
+      </div>
+      <div class="mt-3">
+        <label class="field-label">Exit confirmation (consecutive evaluations)</label>
+        <input name="exit_confirmation_windows" type="number" min="1" step="1" value="${cfg.exit_confirmation_windows || 1}" class="field-input w-40" />
+        <p class="text-xs text-slate-400 mt-1">A crossed stop/target must stay crossed for this many evaluations in a row before the close actually fires -- 1 = fire on the first crossing (default). Each evaluation is one raw tick if the interval above is Off, or one window close otherwise.</p>
+      </div>
+    </fieldset>
+
     <div class="flex gap-3">
       <button type="button" onclick="submitProgramForm()" class="relative inline-flex items-center justify-center h-11 px-6 rounded-[0.3rem] text-sm font-medium adv-accent-bg-600 text-white shadow-sm">
         ${editingProgramId ? "Save changes" : "Create Program"}
@@ -552,6 +637,8 @@ async function submitProgramForm() {
       days: fd.get("schedule_days") || "all",
       inter_cycle_delay_seconds: num(fd.get("schedule_inter_cycle_delay_seconds")) ?? 0,
     },
+    trail_check_interval_seconds: readTrailIntervalFromForm(fd),
+    exit_confirmation_windows: num(fd.get("exit_confirmation_windows")) || 1,
   };
   try {
     if (editingProgramId) {

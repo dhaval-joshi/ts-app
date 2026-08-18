@@ -2,6 +2,8 @@ const strategyForm = document.getElementById("strategyForm");
 const timeExitMode = document.getElementById("timeExitMode");
 const windowFields = document.getElementById("windowFields");
 const atField = document.getElementById("atField");
+const trailIntervalMode = document.getElementById("trailIntervalMode");
+const trailIntervalCustomField = document.getElementById("trailIntervalCustomField");
 const listView = document.getElementById("strategyListView");
 const formView = document.getElementById("strategyFormView");
 const strategyListEl = document.getElementById("strategyList");
@@ -14,6 +16,20 @@ timeExitMode.addEventListener("change", () => {
   windowFields.classList.toggle("hidden", timeExitMode.value !== "intraday_window");
   atField.classList.toggle("hidden", timeExitMode.value !== "datetime");
 });
+
+trailIntervalMode.addEventListener("change", () => {
+  trailIntervalCustomField.classList.toggle("hidden", trailIntervalMode.value !== "custom");
+});
+
+// Reverse-maps a stored seconds value to its matching preset option, or "custom"
+// pre-filled with that value if it doesn't match any preset exactly -- reuses
+// TRAIL_INTERVAL_PRESETS from programs.js (both loaded together on index.html).
+function applyTrailIntervalToForm(seconds) {
+  const isCustom = !TRAIL_INTERVAL_PRESETS.some((p) => p.value === seconds);
+  trailIntervalMode.value = isCustom ? "custom" : String(seconds);
+  strategyForm.trail_check_interval_custom.value = isCustom ? seconds : "";
+  trailIntervalMode.dispatchEvent(new Event("change"));
+}
 
 // Convenience default: a fresh "intraday" strategy defaults its time-based
 // close to the 15:10-15:15 window, but only while the time-exit mode is
@@ -61,6 +77,7 @@ function buildPayload(fd) {
       window_end: fd.get("window_end") || null,
       at: fd.get("at") || null,
     },
+    trail_check_interval_seconds: readTrailIntervalFromForm(fd),  // shared with programs.js
   };
 }
 
@@ -101,6 +118,8 @@ function applyStrategy(s) {
   strategyForm.window_end.value = s.time_exit?.window_end || "";
   strategyForm.at.value = s.time_exit?.at || "";
   timeExitMode.dispatchEvent(new Event("change"));
+
+  applyTrailIntervalToForm(s.trail_check_interval_seconds || 0);
 }
 
 // ------------------------------------------------------------ list view
@@ -188,6 +207,7 @@ function showStrategyForm() {
   editingId = null;
   strategyForm.reset();
   timeExitMode.dispatchEvent(new Event("change"));
+  trailIntervalMode.dispatchEvent(new Event("change"));
   applyIntradayTimeExitDefault();
   listView.classList.add("hidden");
   formView.classList.remove("hidden");
