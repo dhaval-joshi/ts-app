@@ -53,6 +53,42 @@ work. This file (plus CLAUDE.md and the README) is the handoff.
   explicit action. Fixed by wiring them into the same shared websocket
   push Regular OMS already used (`onOrdersUpdate()` in `app.js`), plus a
   20s periodic safety net for state that isn't in that push.
+- **No timezone handling existed anywhere in the backend** — every
+  timestamp was a naive `datetime.now()`/`date.today()`, silently correct
+  only because the dev machine happens to sit in IST. Fixed with a new
+  `backend/clock.py` (hardcodes `Asia/Kolkata`, independent of host
+  timezone) that every module now goes through for "now" and for parsing
+  stored timestamps. `clock.parse_iso()` treats a naive stored string as
+  IST — every timestamp ever written before this fix genuinely was IST
+  wall-clock time, so this is backward-compatible, not a data migration.
+  If you see a bare `datetime.now()`/`date.today()`/`datetime.fromisoformat()`
+  anywhere in `backend/`, it's a bug — route it through `clock.*` instead.
+  The L1 tick's exchange-side last-traded-time (`ltt`) is now also
+  captured as `order["last_ltt"]` (diagnosis only — never compared for
+  equality or used to drive a decision).
+- **Advanced OMS entry decisions used to be completely blind to market
+  conditions** — fetch spot, ATM strike, buy CE+PE, on a fixed schedule,
+  every time, regardless of whether volatility was cheap or already
+  expensive. Fixed with `backend/entry_signals.py` (pure gate logic,
+  mirrors `program_schedule.py`/`program_safeguards.py`) checked once in
+  `_start_new_cycle`, entirely optional (`ProgramConfig.entry_signals.
+  enabled`, default `False`). Also: `OrderManager.fetch_live_price` was
+  refactored to share its subscribe-and-wait logic with a new
+  `fetch_market_snapshot` (full tick dict, not just `ltp`) — behavior for
+  every existing caller is unchanged, confirmed by a real regression test
+  before this shipped. Live Greeks/IV go through a fully separate new
+  mechanism (`fetch_greeks_snapshot`), deliberately not touching the
+  proven price-fetch path. See the README's "Entry Signal Gates -- BUILT"
+  section for the full design and what's deliberately still deferred
+  (delta-targeted strikes, theta-aware exits — both would mean editing
+  the widening loop or the exit engine directly).
+- **Whether this account is actually entitled to the broker's Greeks/IV
+  channel is unverified** — nothing in this repo proves it, and it can
+  only be confirmed live. The code fails safely either way
+  (`fetch_greeks_snapshot` returns `None` on timeout;
+  `on_greeks_unverifiable` controls whether that skips or allows the
+  cycle), but don't claim confidence about entitlement that hasn't
+  actually been observed working against a real market.
 
 ## Known open items / deliberately deferred
 
@@ -80,6 +116,13 @@ work. This file (plus CLAUDE.md and the README) is the handoff.
 - **Market vs. Limit order for the close**, configurable per Program, is
   also designed in the README (tied to the timeframe-trailing item) but
   not built.
+- **Cloud migration is not scheduled** — this remains a locally-run app.
+  A product review (five features to build, five to refuse) and a
+  migration-readiness plan exist as reference for whenever the move
+  happens; ask the person for the artifact link if you need it. The one
+  piece of that round that WAS built now, ahead of any move, is proper
+  timezone handling (see above) — it was a latent correctness bug, not
+  really a migration task, so it didn't make sense to wait on.
 
 ## Working style established across this whole build
 

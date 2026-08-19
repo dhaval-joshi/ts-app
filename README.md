@@ -730,6 +730,12 @@ on schedule," it's not here:
 - **Tick size defaults to 0.05** (see the glossary above) if a strategy
   doesn't specify its own -- correct for most NSE equity/F&O, but check and
   set it explicitly for instruments with a different tick.
+- **All times are IST, hardcoded** -- `backend/clock.py` is the single
+  source of "now" for the whole backend and always resolves to
+  `Asia/Kolkata`, independent of the host machine's own timezone. This
+  matters if you ever run this somewhere other than an IST-local machine
+  (see Section 10, Cloud deployment): market-hours gates, the EOD square-off,
+  and daily counter resets all key off this, not the host clock.
 - **P&L is price-only** -- it doesn't account for brokerage, STT, or other
   charges, and live P&L needs a stream symbol (see "Getting the exchange
   part right" above) -- get the exchange segment wrong and it just silently
@@ -1037,6 +1043,29 @@ that resolve themselves without a person, and hard stops that require one.
   updated exactly as they would be for an automatic SL/target/time-exit
   close; a manually-closed cycle's result counts toward the daily total
   and the consecutive-loss streak the same as any other cycle's does.
+- **Closing a single leg**, narrower still: each active leg's own card has
+  a "Close this leg" action (market only, deliberately -- this is a "get
+  me out now" control, not a place for a limit-price negotiation). Purely
+  exposes the same generic `request_close()` every other close in this app
+  already goes through -- Program legs were simply never given a UI path
+  to it before. The cycle as a whole wraps up normally once both legs
+  resolve, same as any other close.
+- **Conditional auto-close on repeated stop tests**
+  (`stop_breach_force_close_count`, on both Strategies and Programs): for
+  a leg that keeps testing its stop and recovering before ever confirming
+  a close -- exactly the shape `exit_confirmation_windows` (see "Timeframe-
+  aggregated trailing and exit checks" in Section 9) can prolong rather
+  than prevent, since a bouncing price that keeps
+  recovering just before confirmation never accumulates enough
+  consecutive crossings to fire. Every time the stop is hit and then
+  recovers without the leg actually closing, a persisted lifetime counter
+  (`stop_breach_count` -- a real order field, like `trail_update_count`,
+  not in-memory state that would reset on a restart) increments. Once
+  that count reaches the configured limit, the *next* hit force-closes
+  immediately, deliberately bypassing `exit_confirmation_windows` for
+  that specific close -- the repeated testing itself becomes the signal
+  that waiting for one more confirmation isn't buying anything. Stop side
+  only; 0 (off) is the default.
 - **A known, bounded timing edge case worth knowing about**: each tick
   recomputes Risk Group/Portfolio aggregates once, at the start of that
   tick, *before* processing that same tick's cycle closures -- so a cycle
@@ -1101,10 +1130,30 @@ backend/
                           flag, day-filter, inter-cycle delay) -- WHEN a Program is
                           eligible to trade, a different question from whether it
                           should stop (that's program_safeguards.py)
+  entry_signals.py           pure gate logic (VIX ceiling/percentile, OI buildup,
+                          session range, live-Greeks IV-session-rank) -- do
+                          MARKET CONDITIONS right now favor entering, a different
+                          question again from WHEN eligible or WHETHER to stop;
+                          see "Entry Signal Gates" above
+  clock.py                   single source of "now" for the whole backend -- always
+                          resolves to Asia/Kolkata regardless of host timezone; every
+                          `datetime.now()`/`date.today()`/`fromisoformat` call in this
+                          codebase goes through here, see Section 6 and Section 10
   heartbeat.py              pure health-zone computation (green/yellow/orange/red)
                           + the internet-reachability check
   failure_log.py            centralized data/failures.jsonl -- see "Centralized
                           failure log" above
+  factsheet.py               durable, immutable order/cycle snapshots (survive
+                          Program/order deletion or editing) + the Trading Journal's
+                          read-side aggregation -- see "Durable factsheets + Trading
+                          Journal" above
+  broker_reconcile.py        on-demand pass over already-closed LIVE orders, checking
+                          this app's own records against the broker's -- distinct from
+                          OrderManager.reconcile_loop (the always-on, currently-open-
+                          positions loop); see "Broker reconciliation" above
+  broker_interface.py        the BrokerClient Protocol both OrderManager and
+                          ProgramManager depend on instead of TradejiniClient directly
+                          -- the seam multi-broker execution will eventually use
   stream_manager.py         asyncio bridge around the vendored streaming SDK --
                           shared by both the live and paper OrderManager instances;
                           tracks each one's own subscription set separately so
@@ -1134,8 +1183,12 @@ frontend/
   programs.js                       Advanced OMS: Program/Risk Group cards, create/
                                   edit dialogs, cycle drill-down, Paper/Live +
                                   capital sizing controls
+  journal.js                        Trading Journal: combined Regular/Advanced OMS
+                                  history read from factsheet.py's durable records --
+                                  own top-level nav section, spans both OMS types the
+                                  same way Portfolio already does
   admin.js                          Admin page logic: accent color, Portfolio
-                                  Safeguards, Failures browser
+                                  Safeguards, Failures browser, Reconciliation tab
   tabs.js                           all tab/section-switching logic
   style.css                         custom CSS layer -- dialog show/hide, the ul/li
                                   dropdown, the Advanced OMS accent CSS variables
@@ -1149,6 +1202,16 @@ data/
   programs/                one JSON file per Program (config + runtime state + logs
                           + numbered cycle history + the archived flag)
   risk_groups/              one JSON file per Risk Group (name + optional cap override)
+  factsheets/orders/          one JSON file per terminal order -- immutable snapshot +
+                          amendments array, outlives the order/Program that created it
+  factsheets/programs/<id>/   one JSON file per closed cycle, per Program -- same
+                          immutable-snapshot-plus-amendments shape as orders above
+  reconcile_reports/          one JSON file per broker_reconcile.py run (dry or
+                          applied) -- the full per-order finding list, not just a summary
+  signal_history/             one small JSON file per trading day (currently just
+                          the day's India VIX close seen) -- entry_signals.py's
+                          VIX-percentile gate builds real history from this over a
+                          few weeks; NOT a historical-data pipeline, see above
   script_master/             cached index/option data from Tradejini's live feed,
                           refetched automatically when their version changes
   portfolio_safeguards.json  the portfolio-wide daily-loss cap + its on/off toggle
@@ -1157,6 +1220,9 @@ data/
   market_holidays.json       optional -- exchange holidays for correct expiry
                           working-day counting (see Migration above)
   failures.jsonl            centralized operational failure log, see above
+Dockerfile / docker-compose.yml / .dockerignore / Caddyfile
+                            cloud deployment artifacts -- inert, not built/run as
+                          part of producing them; see Section 10
 ```
 
 ---
@@ -1219,7 +1285,12 @@ every raw tick; presets 5s/10s/30s/1min/3min/5min plus a custom-seconds
 input) exists on both `StrategyConfig` and `ProgramConfig`, feeding both
 trailing recalculation and the exit-trigger check from one shared
 setting. Live P&L / `last_ltp` display still updates on every raw tick
-regardless -- only the trailing/exit DECISION is gated. One placement
+regardless -- only the trailing/exit DECISION is gated. Every order also
+carries `last_ltt`, the EXCHANGE's own last-traded-time for its most
+recent tick (always IST, decoded via `backend/clock.py`'s timezone) --
+kept purely for diagnosis (is this tick fresh, has our clock drifted from
+the exchange's), never compared for equality or used to drive any
+decision. One placement
 deviation from the original sketch below: `trail_check_interval_seconds`
 lives as a **top-level `ProgramConfig` field**, not on `ScheduleConfig`
 -- `ScheduleConfig`'s own docstring scopes it strictly to cycle-*start*
@@ -1266,46 +1337,234 @@ timeframe setting above.
   direction (to increase fill likelihood at a small cost to price) --
   probably worth making that buffer configurable too, defaulting to 0.
 
-### Broker reconciliation (sync Trading Station's own records against the broker's)
+### Broker reconciliation -- BUILT
 
-**The problem**: right now, this app's own JSON files (`data/orders/`,
-Program `cycles` history) are the only source of truth it ever checks
-against itself -- there's no periodic "does what I think happened
-actually match what the broker's own records say happened" pass. If
-something in this app's own state ever drifts from reality (a missed
-tick, a reconciliation edge case not yet found, anything), there's
-currently no self-healing check that would catch and correct it after
-the fact.
+Originally written up here as a Phase 3/4 proposal; now implemented as
+`backend/broker_reconcile.py`, an on-demand pass (Admin page ->
+Reconciliation tab, or `POST /api/reconcile`) over already-CLOSED, LIVE
+orders only -- never a currently-open position, which is what the
+always-on `OrderManager.reconcile_loop()` already handles continuously
+(that loop and this module are deliberately two different things with
+two different names, precisely to avoid the confusion "reconcile" would
+otherwise cause in this codebase).
 
-**The proposed fix**: a reconciliation job -- fetch the broker's own
-order history (Tradejini's `get_orders`/`get_trades`, or whatever
-endpoint gives a authoritative closed-order list) for a given day, and
-for every CLOSED order in this app's own records, compare (order status,
-fill price, quantity, realized P&L) against what the broker's own record
-says, updating this app's own JSON (order file, and by extension the
-owning cycle's persisted record in the Program's `cycles` list, and
-`daily_realized_pnl` if it turns out to be wrong) wherever they disagree.
+**What actually shipped, and where it deviates from the original sketch
+below**:
+- **`dry_run` defaults to `True`.** The first call always previews (full
+  report, corrects nothing); an explicit second call with
+  `dry_run: false` actually writes. This is what makes "never a silent
+  correction" real on live-money records, not just a docstring promise.
+- **Comparison spine is `get_orders()`**, not `get_trades()` -- the only
+  broker response shape this codebase has real production evidence for
+  (the exact fields the live reconcile loop already trusts daily:
+  `orderId`/`status`/`fillQty`/`avgPrice`). `get_trades()` is consumed
+  defensively, as enrichment/orphan-detection only, never assumed to have
+  a specific shape. `get_positions()` is out of scope entirely -- it's
+  netted by symbol, with no `orderId` to join against a local order.
+- **Compares BOTH broker-side legs of a local order independently** --
+  the entry order and (once closed) the square-off/exit order each have
+  their own `broker_order_id`. Comparing only the entry leg would never
+  actually check the close side, which is exactly where a wrong exit
+  price would show up.
+- **`pnl.realized` is never copied from the broker -- it's recomputed
+  locally**, via the exact same `_finalize_realized_pnl` every other
+  close in this app already uses, from the (possibly corrected) fill
+  data. A broker P&L figure is almost certainly net-of-brokerage/STT/GST
+  while this app's own figure is gross; comparing them directly would
+  disagree on nearly every order for reasons that have nothing to do
+  with a real discrepancy.
+- **`daily_realized_pnl` and every other safeguard counter are
+  report-only, never auto-corrected** -- silently rewriting a counter
+  that already drove a real halt/resume decision this session, or
+  double-counting it on a re-run, is a materially worse failure mode
+  than the drift it would be fixing.
+- **Corrections are convergent** (`local := broker's value`), never
+  incremental -- what makes re-running safe: a second run against
+  unchanged broker state finds zero remaining diffs and writes nothing.
+- **Every correction is recorded as an amendment** on the affected
+  order's Journal factsheet (and, for a Program leg, the owning cycle's
+  factsheet too) -- the original snapshot stays untouched; the amendment
+  is the visible, auditable record of what changed and why. See "Durable
+  factsheets + Trading Journal" below.
+- **A day-scoping check** (`VERDICT_UNVERIFIABLE`) treats any local order
+  from a previous session as unverifiable rather than a discrepancy --
+  the broker's own order book is day-scoped, so an old order legitimately
+  having no current broker record isn't drift.
+- **`find_stale_open_orders`** is a new, report-only check beyond the
+  original sketch: a LIVE order still non-terminal locally whose
+  instrument's expiry has already passed is flagged loudly (possible
+  invisible NSE options expiry auto-settlement/exercise -- the one class
+  of drift `get_orders()`/`get_trades()` may not reliably surface at
+  all). Never corrects anything automatically.
+- Correcting an order that's already been archived writes back to the
+  archive path (`store.save_order_in_place`), never `data/orders/`
+  directly -- doing otherwise would resurrect a duplicate copy in the
+  active folder, the exact bug class AGENTS.md documents for a different
+  reason.
 
-**Design notes for whoever builds this**:
-- Scope this to CLOSED orders only, at least at first -- reconciling
-  currently-OPEN positions against a mid-flight broker state is a much
-  harder problem (that's what the existing live reconciliation loop
-  already does, continuously); this is specifically about catching drift
-  in the historical record after the fact, not replacing the live loop.
-- Whether this runs as a background job (e.g. once at end of day) or is
-  triggered on demand from the UI (an "Reconcile now" button) is worth
-  deciding based on how much you trust the live loop by the time this
-  gets built -- an on-demand button is the safer place to start.
-- Needs to decide what "disagreement" means precisely (exact price match?
-  a tolerance?) and needs a clear, visible log/report of what it changed,
-  not just silent correction -- the whole point is trust, so the
-  correction itself needs to be auditable.
-- This is the natural, safer place to also close the earlier gap flagged
-  when Paper/Live mode shipped: only paper orders' `get_positions`/
-  `get_trades` were ever stubbed to raise (deliberately, so tier-1 order
-  matching stayed authoritative for paper) -- a real reconciliation pass
-  is where actually calling the LIVE broker's real positions/trades
-  endpoints for cross-checking purposes would make sense.
+Original design sketch, for context:
+
+**The problem**: this app's own JSON files were the only source of truth
+it ever checked against itself -- there was no periodic "does what I
+think happened actually match what the broker's own records say
+happened" pass. If anything in this app's own state ever drifted from
+reality (a missed tick, an edge case not yet found), there was no
+self-healing check that would catch and correct it after the fact.
+
+### Durable factsheets + Trading Journal -- BUILT
+
+**The problem**: deleting a Program (or editing one mid-flight) used to
+lose its history. `program["cycles"]` -- the rollup tying a Program's
+cycles together (P&L, timestamps, which orders belong to which cycle) --
+lives inside the Program's own JSON file and is capped at 500 entries; it
+dies with the Program the moment it's deleted, even though the
+underlying order files themselves already survived deletion (orders live
+in their own `data/orders/` files, tagged with `program_id`/`cycle_id`,
+never touched by `delete_program`). And even the orders that DID survive
+never recorded the Program-level config (safeguards, schedule, sizing) or
+the capital-check widening outcome as they stood at the moment a specific
+cycle actually ran -- editing a Program's stop-loss % between cycle 4 and
+cycle 5 left no record of which value was actually in effect for either.
+
+**What was built**: `backend/factsheet.py` writes an immutable,
+independently-durable snapshot exactly once, at the moment an outcome is
+known -- for every order that reaches a terminal status (Regular OMS or
+an Advanced OMS leg, live or paper) and for every Program cycle that
+closes (regardless of why: SL/target/time-exit, Stop & Flatten, or the
+manual Close Cycle action) -- stored entirely outside `data/programs/`
+and `data/orders/`, at `data/factsheets/orders/<order_id>.json` and
+`data/factsheets/programs/<program_id>/<cycle_id>.json`.
+
+- **A cycle factsheet embeds the config as it stood at cycle START**, not
+  whatever the Program's config happens to be by the time the cycle
+  closes -- captured in a new `program["active_cycle_snapshot"]` the
+  instant `_start_new_cycle` sets `active_cycle_id` (the only point that
+  knows both the config-in-effect and the capital-check widening outcome;
+  `update_program` has no active-cycle guard, so config genuinely can
+  change mid-cycle), consumed and cleared in `_close_cycle`. Also records
+  the widening outcome (whether/how far the strangle-widening retry --
+  see the Margin pre-check section above -- kicked in for that specific
+  cycle) and the spot/expiry/strikes actually selected.
+- **A Program leg's order gets BOTH its own order factsheet AND a full
+  embedded copy inside its cycle's factsheet**, deliberately duplicated
+  -- the order factsheet fires at that leg's own terminal transition,
+  which can be minutes before the cycle closes, and is the only surviving
+  record if the leg is rejected at placement (the cycle never fully
+  forms) or the Program is deleted in between.
+- **Immutability is structural, not a convention to remember**: the only
+  write path into an already-existing factsheet is `append_amendment`,
+  and it only ever appends to an `amendments: []` array -- it never
+  touches the original snapshot fields. `apply_amendments()` is a pure,
+  read-time projection of "the snapshot with every amendment folded in";
+  the file on disk is never rewritten by it. This is what
+  broker_reconcile.py's corrections write into, so a corrected record and
+  its original, as-it-happened snapshot are never conflated into one
+  mutable blob.
+- **`strategy_snapshot`** (a new field on every order, both Regular OMS
+  and Program legs) captures the resolved strategy/leg config exactly as
+  used for that specific order -- the same problem as the cycle-config
+  snapshot, one level down: a Strategy can be renamed/edited/deleted
+  after the fact too.
+- **Paper Programs and orders get factsheets too** -- losing a paper
+  Program's history on deletion is the same problem this feature exists
+  to solve, just without real money involved. Broker reconciliation
+  (above) is the one piece that stays strictly live-only, since paper
+  never talks to a real broker.
+- **The Trading Journal** (new top-level nav section, spanning both OMS
+  types the same way Portfolio already does) is the read side: a
+  chronological list of closed cycles and standalone Regular OMS orders
+  -- a Program leg's own factsheet exists but isn't separately listed,
+  since it's already embedded in its cycle's entry -- each opening into a
+  detail view showing P&L, legs, and any reconciliation corrections
+  (`GET /api/journal`, `/api/journal/cycle/{program_id}/{cycle_id}`,
+  `/api/journal/order/{order_id}`, the latter two returning the
+  amendments-applied "current best-known truth" view alongside the raw
+  amendment trail for transparency).
+- Zero migration was needed for any of this -- the orders directory had
+  no existing data at the time this was built, and per this file's own
+  "no backward-compatibility obligation on stored data" stance, old
+  Program/order files simply never get a factsheet retroactively.
+
+### Entry Signal Gates -- BUILT
+
+**The problem**: `_start_new_cycle` was completely blind to market
+conditions -- fetch spot, pick the nearest expiry, pick the ATM strike,
+buy CE + PE (a long straddle), on a fixed schedule, every time. For a
+strategy that profits from a big move and bleeds to time decay when the
+market sits still, that's a real gap: nothing stopped a cycle from
+entering right after volatility (and premium) was already expensive, or
+right after the day's move had already happened.
+
+**What was built**: `backend/entry_signals.py`, a pure decision module
+(mirroring `program_schedule.py`/`program_safeguards.py`'s own shape --
+no I/O, every gate a function returning `(allowed, reason)`) checked once
+in `_start_new_cycle`, right after the ATM pair is resolved and before
+the widening/margin loop runs. Entirely optional -- `ProgramConfig.
+entry_signals.enabled` defaults to `False`, and every threshold
+underneath that is itself independently optional, so nothing changes for
+a Program that doesn't opt in.
+
+- **Five gates, each usable on its own**: an India VIX ceiling; an Open
+  Interest buildup check (`OIChngPer`, already decoded by the streaming
+  SDK and previously discarded); a same-session range check
+  (`(high-low)/open` on the underlying, an approximation of "the move
+  already happened" -- not a real multi-day compression/squeeze
+  detector, which would need a price history this app doesn't keep); a
+  VIX-percentile gate against the app's own accumulated history (see
+  below); and a live-Greeks IV-session-rank gate (today's IV relative to
+  its own `[lowiv, highiv]` range so far -- needs zero stored history at
+  all, since both bounds ship on the same tick as the current value).
+- **Data plumbing, not a new pipeline**: the streaming SDK
+  (`nxtradstream.py`) already decodes Open Interest, session O/H/L, VWAP,
+  and India VIX on the exact same L1 subscription already in use --
+  `order_manager.py` just discarded everything except `ltp`.
+  `fetch_live_price` was refactored (behavior unchanged for every
+  existing caller) to share its subscribe-and-wait logic with a new
+  `fetch_market_snapshot`, which returns the full tick dict instead of
+  just the price. Live Greeks/IV needed one genuinely new piece --
+  `subscribeGreeksSnapShot`, present but unused in the vendored SDK --
+  wired through as a fully separate one-shot mechanism
+  (`fetch_greeks_snapshot`), never touching the proven price-fetch path.
+- **Entitlement is unverified, and the code says so.** Whether this
+  account can actually receive the Greeks channel isn't provable from
+  this repo. `fetch_greeks_snapshot` returns `None` on timeout -- which
+  **is** the live answer, discovered naturally the first time a Program
+  with the IV-rank gate enabled actually runs, rather than needing a
+  separate diagnostic step. `on_greeks_unverifiable` (`"allow"` default,
+  or `"skip"`) decides what happens in that case; `"allow"` mirrors an
+  existing, deliberate precedent in this exact file -- a margin check
+  that raises also returns `True` and lets the trade through
+  (`_check_buffered_margin`). Logged once per Program per day (in-memory
+  only, like `_trail_state`), not spammed every 15s tick.
+- **A small daily VIX snapshot, not a historical-data pipeline.** One
+  scalar (`vix_close_seen`) written at most once per calendar day, to
+  `data/signal_history/<date>.json`, the first time any Program's gate
+  check runs that day -- reuses data already being fetched for the VIX
+  ceiling gate, no new subscription or loop. Over a few weeks this builds
+  real IV-percentile context (`max_vix_percentile`); before
+  `vix_percentile_min_days` of history exist, that specific gate always
+  allows.
+- **A rejected entry is non-halting**, matching the existing
+  capital-shortfall pattern exactly: `_set_program_alert` (visible,
+  persistent, cleared automatically once a cycle actually starts),
+  `failure_log.log_failure(category="program_entry_signal_blocked", ...)`,
+  and the Program just retries next tick as conditions change.
+- **Fetches run concurrently with a short (3s) timeout**, deliberately
+  separate from the 8s timeout on the essential spot-price fetch --
+  `_tick_one` calls are sequential across every Program, so a slow or
+  closed feed on one Program's optional signal check must not stall
+  every other Program's tick behind it.
+- **Deliberately not built in this round**: delta-targeted strike
+  selection and theta-aware dynamic exit timing are real ideas that came
+  out of the same research (Greeks give real per-leg delta/theta), but
+  both would mean editing the widening loop or the exit engine directly
+  -- both safety-critical, both already carrying a lot of recently-added
+  logic. This round is gates only: whether/when a cycle starts, never
+  which strikes get chosen or when an open cycle exits. Also not built:
+  L5 depth/order-book imbalance and streaming OHLC candles (both
+  decodable per this round's research, no concrete use case identified
+  yet for this strategy); Regular OMS support (Advanced OMS Programs
+  only, for now).
 
 ### Programs decoupled from Index -- any tradeable instrument, not just an Index
 
@@ -1338,7 +1597,165 @@ the safer starting point even though it duplicates some logic, unless
 there's a clear near-term need for more than a couple of different
 Program shapes.
 
+### Multi-broker execution: the Super Program design (schema groundwork only, not built)
+
+**The problem**: `broker_interface.py`'s `BrokerClient` Protocol already
+names multi-broker execution as its stated reason for existing --
+spreading capital across broker accounts to avoid entry limits or strike
+saturation on any single one -- but today there is exactly one broker
+(`TradejiniClient`, instantiated once, at module level, in `main.py`) and
+nothing in `Order`/`ProgramConfig` identifies which broker anything
+actually traded through.
+
+**Schema groundwork that HAS shipped**, so a second broker can be added
+later without a schema migration: `broker_id` on `BrokerClient` (a plain
+attribute -- `TradejiniClient.broker_id = "tradejini"`; `PaperBrokerClient`
+deliberately has none, read via `getattr(client, "broker_id", None)`
+everywhere so paper is `None` without a special case), on every `Order`
+(stamped at creation from the client that placed it), and on
+`ProgramConfig` (which broker that Program trades through when
+`mode == "live"`) -- plus a reserved, currently-always-`None`
+`super_program_id` field on `ProgramConfig`. **Building an actual second
+broker connection is explicitly NOT part of this** -- a real second
+`BrokerClient` implementation, its own `StreamManager`/credentials, and
+routing a Program to the right one are all separate, sizable future work.
+
+**The confirmed design for when that future work happens**: a **Super
+Program** -- a parent entity holding one shared strategy template
+(index, stop/target, safeguards/schedule templates, sizing) plus a list
+of broker allocations. Creating or editing it auto-materializes one
+fully ORDINARY child `Program` per broker allocation -- each with its own
+real `program_id`, running the existing, completely unmodified cycle
+lifecycle. Deliberately NOT "teach one Program to run multiple
+simultaneous cycles internally" -- that would touch the safety-critical
+`_tick_one`/`_start_new_cycle` invariant that a Program has exactly one
+`active_cycle_id`, for comparatively little benefit over just reusing the
+machinery that already exists and is already trusted.
+
+**Three gaps identified while designing this, worth knowing before
+building it** (found by reusing the existing Risk Group mechanism to get
+family-wide "the whole broker-spread strategy halts together on a bad
+day" for free, rather than inventing a fourth aggregation tier):
+
+1. `ProgramConfig.risk_group_id` is **singular** -- auto-assigning every
+   child of a Super Program into a dedicated Risk Group consumes that
+   child's only grouping slot. Wanting a child in *both* its Super
+   Program's group and some other correlation group needs a real design
+   decision (multi-membership, or accept the constraint as-is).
+2. Risk Group halting only aggregates the **daily loss cap**
+   (`program_safeguards.apply_group_halt_if_needed` tests nothing else).
+   Reusing it does **not** get you family-wide `consecutive_loss_limit`
+   or `max_cycles_per_day` for free -- those stay per-child, so an
+   N-broker split family-wide tolerates roughly N times the template's
+   stated streak/cycle limits unless the materializer explicitly decides
+   whether to divide or replicate each one. And the group's own daily-loss
+   cap defaults to the **sum** of members' caps -- the materializer must
+   set an explicit override to the intended family-wide cap, or a
+   template of ₹5,000 silently becomes a much larger family exposure
+   across N children. **This is the one that loses real money if missed.**
+3. Deletion/resume ordering: `delete_risk_group` refuses while members
+   exist, so deleting a Super Program must delete its children first,
+   then the group; `resume_program` is per-Program, so a halted family
+   needs N manual resumes, not one.
 
 ### More Feature Requests
 Review and work on MD files under "Additional Feature Requests root" folder.
 Each file moves to "done" inside "Additional Feature Requests root" folder once they are implemented
+
+## 10. Cloud deployment (artifacts ready, move not scheduled)
+
+This app currently runs locally. A cloud move isn't scheduled, but the
+artifacts and this runbook exist so the move is an afternoon of work
+whenever it happens, not a project of its own. `Dockerfile`,
+`docker-compose.yml`, `.dockerignore`, and `Caddyfile` are all present in
+the repo root and are **inert** -- written but not built or run as part of
+producing them. Building and smoke-testing the image is the first real
+step of the migration itself.
+
+### Regulatory constraint that shapes the architecture
+
+SEBI's retail algo trading framework (fully mandatory since 1 April 2026)
+requires a **dedicated static IP registered with your broker** for API
+order placement, with brokers rejecting calls from non-whitelisted IPs and
+only one active API key per registered IP. Two consequences:
+
+- **Serverless is ruled out entirely** -- Cloud Run, Lambda, and anything
+  autoscaling has a dynamic egress IP. A plain VM with a reserved static IP
+  is the only shape that fits. (Independently, see below: this app cannot
+  run as more than one process anyway.)
+- Confirm with Tradejini what their actual IP-registration process is
+  before provisioning anything -- their implementation specifics aren't
+  assumed here.
+
+### Provider
+
+Current plan, when the move happens: **GCP on the $300 signup credit**,
+fully containerized so the provider decision is cheap to revisit once the
+credit runs out (~90 days from signup, regardless of spend). GCP has no
+Mumbai (`asia-south1`) always-free tier -- the free `e2-micro` is US-only
+and unusably far from the broker. Steady-state after the credit is roughly
+$18-20/mo on an `e2-small`; a Mumbai-region Vultr/Linode/Lightsail box runs
+roughly $5-6/mo flat, indefinitely. Re-decide at day ~75, before the credit
+runs out.
+
+**On instance size**: don't over-provision. This is a single-process,
+I/O-bound asyncio app -- one event loop, no database, ~3.7MB of on-disk
+state, no parallel work to exploit (more vCPUs can't be used by one event
+loop). `e2-small`'s 2 vCPU / 2GB is already comfortable headroom;
+`e2-micro` would genuinely run it. The $300 credit's real constraint is
+the 90-day clock, not the dollar amount -- spending it on a bigger trading
+VM just makes the bill bigger at day 91. If the credit should do real
+work, spend it on something separate and bounded (a backtesting or data
+experiment), not on idle headroom here.
+
+### Hard constraints
+
+1. **Exactly one process, ever.** No `--workers`, no replicas, no
+   overlapping rolling deploy. Two `ProgramManager.tick_loop()`s would each
+   independently decide to start cycles -- duplicate real orders. There is
+   no cross-process lock anywhere in this codebase; every lock is an
+   in-process `asyncio.Lock`.
+2. **`data/` must be a persistent, writable volume**, writable at every
+   subdirectory (atomic writes create their `.tmp` file next to the
+   target). It is the sole copy of all trading history and there is no
+   backup mechanism in the app itself -- the current accidental protection
+   from OneDrive sync on the dev machine will not exist on a VM. Back it up.
+3. **Health checks must target `/login`**, not `/api/status` -- everything
+   except `/login`, `/api/auth/login`, and `/static/*` is auth-gated and
+   would return a 302/401 to a probe.
+4. **Egress allowlist**: `api.tradejini.com` (443, REST + the websocket
+   feed) and `www.google.com` (the heartbeat's 60s reachability probe --
+   deliberately not a Tradejini host, to distinguish "no internet" from
+   "broker down"; blocking it makes the heartbeat report red forever).
+5. **TLS and login throttling are prerequisites of exposure, not
+   nice-to-haves.** The app currently serves plain HTTP with a single
+   plaintext password and no login rate limiting -- fine on localhost,
+   not fine on a public IP guarding a live-money account. Set
+   `secure=True` on the session cookie (`main.py`) once TLS is in front
+   (the `Caddyfile` here handles the TLS side automatically).
+6. `APP_PORT` in `config.py` is **dead config** -- read nowhere. The port
+   comes only from the uvicorn CLI flag / the Dockerfile's `CMD`.
+
+### Timezone
+
+Handled in code, not by relying on host configuration -- see
+`backend/clock.py` and the "Known simplifications" section above. The
+`Dockerfile` also sets `TZ=Asia/Kolkata` belt-and-braces, but the app no
+longer actually depends on it.
+
+### First deploy, when it happens
+
+1. Provision the VM in Mumbai (`asia-south1` for GCP), register its static
+   IP with Tradejini.
+2. `git clone`, copy `.env.example` to `.env` and fill in real credentials
+   (never commit `.env`).
+3. `docker compose up -d --build`.
+4. Point the `Caddyfile`'s placeholder domain at the VM's IP, run Caddy (or
+   fold it into `docker-compose.yml` as a second service) for TLS.
+5. Confirm `/login` loads over HTTPS, log in, confirm the heartbeat dot
+   goes green (internet + broker both reachable) and a Program card shows
+   live data.
+6. Set up `data/` backups (the compose file uses a named volume -- back up
+   the volume, e.g. via periodic `docker run --rm -v trading_data:/data ...`
+   tar to off-VM storage).
+7. Calendar reminder before day ~90 to re-decide the provider (see above).

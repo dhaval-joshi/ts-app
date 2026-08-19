@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from datetime import datetime
 from contextlib import asynccontextmanager
 
 from starlette.applications import Starlette
@@ -11,13 +10,15 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from . import auth
+from . import clock
 from . import heartbeat
 from .paper_broker import PaperBrokerClient
 
-from . import config, store, failure_log
+from . import config, store, failure_log, factsheet, broker_reconcile
 from .models import CreateOrderRequest, StrategyConfig, ValidationError, PortfolioSafeguards, as_dict
 from .tradejini_client import TradejiniClient, TradejiniAuthError
 from .stream_manager import StreamManager
+from .nxtradstream import GREEKS
 from .order_manager import OrderManager
 from .script_master import ScriptMaster
 from .program_manager import ProgramManager
@@ -137,7 +138,7 @@ async def _heartbeat_loop():
             _heartbeat_state["entities"] = [
                 {"entity_type": e.entity_type, "name": e.name, "connected": e.connected} for e in entities
             ]
-            _heartbeat_state["checked_at"] = datetime.now().isoformat()
+            _heartbeat_state["checked_at"] = clock.now_iso()
         except Exception:
             log.exception("Heartbeat check failed -- will retry.")
         await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL_SECONDS)
@@ -197,6 +198,12 @@ async def _stream_consumer_loop():
             data = item["data"]
             if "evntType" in data:
                 manager.nudge_reconcile()
+            elif data.get("msgType") == GREEKS:
+                # one-shot IV/Greeks snapshots for entry_signals.py's optional gate -- see
+                # OrderManager.fetch_greeks_snapshot. Previously silently dropped here (no "ltp"
+                # key on a greeks packet, so it fell through every branch and was discarded).
+                await manager.handle_greeks_tick(data)
+                await paper_manager.handle_greeks_tick(data)
             elif "ltp" in data:
                 await manager.handle_l1_tick(data)
                 await paper_manager.handle_l1_tick(data)  # paper fills are driven entirely by ticks (no
@@ -374,6 +381,59 @@ async def api_recent_failures(request):
             return bool(e.get("program_id")) or str(e.get("category", "")).startswith("program_")
         entries = [e for e in entries if _is_advanced(e) == (oms_type == "advanced")][:limit]
     return JSONResponse(entries)
+
+
+async def api_journal_list(request):
+    q = request.query_params
+    entries = factsheet.list_journal_entries(
+        program_id=q.get("program_id") or None,
+        limit=int(q.get("limit", 200)),
+    )
+    return JSONResponse(entries)
+
+
+async def api_journal_cycle_detail(request):
+    fs = factsheet.load_cycle_factsheet(request.path_params["program_id"], request.path_params["cycle_id"])
+    if not fs:
+        return JSONResponse({"detail": "cycle factsheet not found"}, status_code=404)
+    # The corrected (amendments-applied) view is the primary payload -- what actually happened,
+    # best known today -- with the raw amendment trail alongside it for transparency, per
+    # factsheet.py's "immutable original + visible amendment log" design.
+    return JSONResponse({**factsheet.apply_amendments(fs), "amendments": fs.get("amendments", [])})
+
+
+async def api_journal_order_detail(request):
+    fs = factsheet.load_order_factsheet(request.path_params["order_id"])
+    if not fs:
+        return JSONResponse({"detail": "order factsheet not found"}, status_code=404)
+    return JSONResponse({**factsheet.apply_amendments(fs), "amendments": fs.get("amendments", [])})
+
+
+async def api_run_reconcile(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dry_run = body.get("dry_run", True) if isinstance(body, dict) else True
+    brokers = {"tradejini": client}  # a one-entry dict today; _reconcile_one_broker's own loop is
+                                       # already broker-keyed for whenever a second broker exists
+    try:
+        report = await broker_reconcile.run_reconciliation(order_manager=manager, brokers=brokers, dry_run=bool(dry_run))
+    except broker_reconcile.ReconciliationAlreadyRunning:
+        return JSONResponse({"detail": "a reconciliation run is already in progress"}, status_code=409)
+    return JSONResponse(report)
+
+
+async def api_list_reconcile_reports(request):
+    limit = int(request.query_params.get("limit", 50))
+    return JSONResponse(store.list_reconcile_reports(limit=limit))
+
+
+async def api_get_reconcile_report(request):
+    report = store.load_reconcile_report(request.path_params["run_id"])
+    if not report:
+        return JSONResponse({"detail": "reconciliation report not found"}, status_code=404)
+    return JSONResponse(report)
 
 
 async def api_fetch_price(request):
@@ -579,7 +639,7 @@ async def api_status(request):
     last_tick_at = programs.last_tick_at.isoformat() if programs and programs.last_tick_at else None
     tick_stale = bool(
         programs and programs.last_tick_at
-        and (datetime.now() - programs.last_tick_at).total_seconds() > TICK_STALE_AFTER_SECONDS
+        and (clock.now() - programs.last_tick_at).total_seconds() > TICK_STALE_AFTER_SECONDS
     )
     return JSONResponse(
         {
@@ -705,6 +765,12 @@ routes = [
     Route("/api/settings", api_get_settings, methods=["GET"]),
     Route("/api/settings", api_save_settings, methods=["POST"]),
     Route("/api/failures", api_recent_failures, methods=["GET"]),
+    Route("/api/journal", api_journal_list, methods=["GET"]),
+    Route("/api/journal/cycle/{program_id}/{cycle_id}", api_journal_cycle_detail, methods=["GET"]),
+    Route("/api/journal/order/{order_id}", api_journal_order_detail, methods=["GET"]),
+    Route("/api/reconcile", api_run_reconcile, methods=["POST"]),
+    Route("/api/reconcile-reports", api_list_reconcile_reports, methods=["GET"]),
+    Route("/api/reconcile-reports/{run_id}", api_get_reconcile_report, methods=["GET"]),
     Route("/api/price/fetch", api_fetch_price, methods=["POST"]),
     Route("/api/strategies", api_list_strategies, methods=["GET"]),
     Route("/api/strategies", api_save_strategy, methods=["POST"]),

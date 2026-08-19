@@ -557,7 +557,7 @@ function renderOrderCard(o, opts = {}) {
       ${o.logs
         .slice()
         .reverse()
-        .map((l) => `<div>${l.ts.replace("T", " ")} — ${l.msg}</div>`)
+        .map((l) => `<div>${l.ts.replace("T", " ").replace(/\+\d{2}:\d{2}$/, "")} — ${l.msg}</div>`)
         .join("")}
     </div>
     <button type="button" title="Trade details" onclick="showTradeDetails('${o.order_id}', ${opts.isArchived ? "true" : "false"})" class="absolute bottom-3 right-3 inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400 hover:text-blue-600">

@@ -140,6 +140,19 @@ class StrategyConfig:
                                              # DECISION, never execution (a crossed trigger still fires a
                                              # plain market order, same as always). See order_manager.py's
                                              # handle_l1_tick.
+    exit_confirmation_windows: int = 1  # a crossed stop/target trigger must stay crossed for this many
+                                          # CONSECUTIVE evaluations (one raw tick if trail_check_interval_
+                                          # seconds is 0, or one aggregation window close otherwise) before
+                                          # the close actually fires -- 1 = fire on the first crossing
+                                          # (today's exact behavior). Originally Program-only; now on both,
+                                          # per the person's explicit request for full Regular OMS parity.
+    stop_breach_force_close_count: int = 0  # 0 = off, today's exact behavior. > 0: a stop that's been
+                                             # HIT-then-RECOVERED (without actually closing -- see
+                                             # exit_confirmation_windows) this many times gets force-closed
+                                             # on the next hit, bypassing exit_confirmation_windows for that
+                                             # specific close -- repeated testing of the same level is itself
+                                             # treated as the signal. Stop side only. See order_manager.py's
+                                             # _maybe_app_market_exit.
     # NOTE: there used to be a configurable exit_mechanism field here
     # ("broker" real-OCO vs "app_market" app-watched), and before that,
     # broker-side OCO/stop/target orders were the ONLY mechanism at all.
@@ -162,6 +175,12 @@ class StrategyConfig:
         trail_check_interval_seconds = int(d.get("trail_check_interval_seconds") or 0)
         if trail_check_interval_seconds < 0:
             raise ValidationError("trail_check_interval_seconds must be >= 0")
+        exit_confirmation_windows = int(d.get("exit_confirmation_windows") or 1)
+        if exit_confirmation_windows < 1:
+            raise ValidationError("exit_confirmation_windows must be >= 1")
+        stop_breach_force_close_count = int(d.get("stop_breach_force_close_count") or 0)
+        if stop_breach_force_close_count < 0:
+            raise ValidationError("stop_breach_force_close_count must be >= 0")
         # editing an existing strategy sends its id back so the save
         # overwrites the SAME file (a true rename) instead of creating a
         # new one under the new name -- generate a fresh one only when
@@ -179,6 +198,8 @@ class StrategyConfig:
                                                 default_trailing_enabled=True, default_trail_by=2.0),
             time_exit=TimeExitConfig.from_dict(d.get("time_exit")),
             trail_check_interval_seconds=trail_check_interval_seconds,
+            exit_confirmation_windows=exit_confirmation_windows,
+            stop_breach_force_close_count=stop_breach_force_close_count,
         )
 
 
@@ -261,6 +282,74 @@ class ScheduleConfig:
 
 
 @dataclass
+class EntrySignalConfig:
+    """Optional live-market preconditions checked right before a cycle
+    actually starts -- a different question again from ScheduleConfig
+    (WHEN is a cycle eligible by time/day) and SafeguardsConfig (SHOULD
+    this Program stop due to bad performance): this asks whether market
+    CONDITIONS right now favor entering a long straddle at all. See
+    entry_signals.py for the pure gate logic this config drives.
+
+    `enabled=False` (the default) is a hard master switch -- nothing
+    below has any effect at all unless explicitly turned on, same
+    convention as every other additive field in this app. Each threshold
+    below is independently optional on top of that: a None threshold
+    means that specific gate isn't configured, so turning `enabled` on
+    with nothing else set changes nothing."""
+    enabled: bool = False
+    max_vix: Optional[float] = None                 # skip if India VIX (IDX_-15_NSE) is above this
+    max_oi_chng_pct: Optional[float] = None          # skip if either leg's OI has moved more than this % today
+    max_session_range_pct: Optional[float] = None    # skip once (high-low)/open on the underlying exceeds this %
+    max_vix_percentile: Optional[float] = None        # skip unless today's VIX ranks below this percentile of
+                                                        # its own recent history (see signal_history.py)
+    vix_percentile_min_days: int = 10                 # don't apply max_vix_percentile until this many days of
+                                                        # history exist -- a percentile from too few samples
+                                                        # isn't a real signal
+    max_iv_session_rank_pct: Optional[float] = None   # skip unless a leg's live IV ranks below this % of
+                                                        # TODAY's own [lowiv, highiv] range -- needs live Greeks
+    on_greeks_unverifiable: str = "allow"              # "allow" | "skip" -- what to do when
+                                                        # max_iv_session_rank_pct is set but Greeks never
+                                                        # arrived at all (entitlement unconfirmed for this
+                                                        # account). "allow" (fail open) mirrors an existing,
+                                                        # deliberate precedent in this exact file: a margin
+                                                        # check that raises also returns True and lets the
+                                                        # trade through (program_manager._check_buffered_margin)
+                                                        # -- don't let an unverified diagnostic channel
+                                                        # indefinitely block real trading.
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "EntrySignalConfig":
+        d = d or {}
+        on_unverifiable = d.get("on_greeks_unverifiable") or "allow"
+        if on_unverifiable not in ("allow", "skip"):
+            raise ValidationError('entry_signals.on_greeks_unverifiable must be "allow" or "skip"')
+        min_days = int(d.get("vix_percentile_min_days", 10) or 10)
+        if min_days < 1:
+            raise ValidationError("entry_signals.vix_percentile_min_days must be >= 1")
+        pct_fields = {
+            "max_vix": d.get("max_vix"),
+            "max_oi_chng_pct": d.get("max_oi_chng_pct"),
+            "max_session_range_pct": d.get("max_session_range_pct"),
+            "max_vix_percentile": d.get("max_vix_percentile"),
+            "max_iv_session_rank_pct": d.get("max_iv_session_rank_pct"),
+        }
+        parsed = {}
+        for key, raw in pct_fields.items():
+            parsed[key] = _opt_float(raw)
+            if parsed[key] is not None and parsed[key] < 0:
+                raise ValidationError(f"entry_signals.{key} must be >= 0")
+        for key in ("max_vix_percentile", "max_iv_session_rank_pct"):
+            if parsed[key] is not None and parsed[key] > 100:
+                raise ValidationError(f"entry_signals.{key} must be <= 100")
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            vix_percentile_min_days=min_days,
+            on_greeks_unverifiable=on_unverifiable,
+            **parsed,
+        )
+
+
+@dataclass
 class ProgramConfig:
     program_id: str
     name: str
@@ -272,6 +361,18 @@ class ProgramConfig:
     mode: str = "live"        # "live" | "paper" -- paper mode simulates fills against live prices via
                                 # PaperBrokerClient instead of placing real orders; same orchestration,
                                 # safeguards, and UI either way -- only where the order actually goes differs
+    broker_id: str = "tradejini"  # which broker this Program trades through when mode=="live" (ignored
+                                    # for paper). Exactly one broker exists today, so this is schema-only
+                                    # groundwork for a future where a Program can be assigned to any
+                                    # registered broker -- see TradejiniClient.broker_id and
+                                    # broker_interface.py's module docstring for the stated direction.
+    super_program_id: Optional[str] = None  # non-None only for a Program auto-materialized as one
+                                              # broker-allocation child of a future "Super Program" (a
+                                              # parent holding one shared strategy template spread across
+                                              # multiple broker accounts) -- reserved now, not used by
+                                              # anything yet; no Super Program entity exists. Every Program
+                                              # created today gets None and stays a fully independent
+                                              # Program in every respect.
     min_working_days_to_expiry: int = 2
     lots_per_leg: int = 1     # used when sizing_mode == "lots" (both legs always equal)
     sizing_mode: str = "lots"  # "lots" | "capital"
@@ -306,9 +407,18 @@ class ProgramConfig:
                                           # CONSECUTIVE evaluations (each evaluation being either one raw
                                           # tick, if trail_check_interval_seconds is 0, or one aggregation
                                           # window close) before the close actually fires -- 1 = fire on the
-                                          # first crossing (today's exact behavior). Program-only (not on
-                                          # StrategyConfig) per the person's explicit choice: Regular OMS
-                                          # orders always fire immediately, same as before this feature.
+                                          # first crossing (today's exact behavior). Also on StrategyConfig
+                                          # now -- full Regular OMS parity, per explicit request.
+    stop_breach_force_close_count: int = 0  # 0 = off. > 0: once the stop has been HIT-then-RECOVERED
+                                          # (without actually closing) this many times, the NEXT hit
+                                          # force-closes immediately, bypassing exit_confirmation_windows
+                                          # for that specific close -- see StrategyConfig's field of the
+                                          # same name and order_manager.py's _maybe_app_market_exit. Stop
+                                          # side only. Unlike exit_confirmation_windows, this one DOES also
+                                          # exist on StrategyConfig -- full parity from the start.
+    entry_signals: EntrySignalConfig = field(default_factory=EntrySignalConfig)  # optional live-market
+                                          # preconditions checked right before a cycle starts -- see
+                                          # EntrySignalConfig's own docstring and entry_signals.py
     # NOTE: exit_mechanism used to be configurable here too -- retired for
     # the same reason as StrategyConfig's (see that field's removal note
     # above).
@@ -334,6 +444,8 @@ class ProgramConfig:
         mode = d.get("mode") or "live"
         if mode not in ("live", "paper"):
             raise ValidationError('mode must be "live" or "paper"')
+        broker_id = (d.get("broker_id") or "tradejini").strip()
+        super_program_id = d.get("super_program_id") or None
         sizing_mode = d.get("sizing_mode") or "lots"
         if sizing_mode not in ("lots", "capital"):
             raise ValidationError('sizing_mode must be "lots" or "capital"')
@@ -350,6 +462,9 @@ class ProgramConfig:
         exit_confirmation_windows = int(d.get("exit_confirmation_windows") or 1)
         if exit_confirmation_windows < 1:
             raise ValidationError("exit_confirmation_windows must be >= 1")
+        stop_breach_force_close_count = int(d.get("stop_breach_force_close_count") or 0)
+        if stop_breach_force_close_count < 0:
+            raise ValidationError("stop_breach_force_close_count must be >= 0")
 
         return cls(
             program_id=program_id,
@@ -358,6 +473,8 @@ class ProgramConfig:
             risk_group_id=d.get("risk_group_id") or None,
             product=product,
             mode=mode,
+            broker_id=broker_id,
+            super_program_id=super_program_id,
             min_working_days_to_expiry=min_wd,
             lots_per_leg=lots,
             sizing_mode=sizing_mode,
@@ -373,6 +490,8 @@ class ProgramConfig:
             schedule=ScheduleConfig.from_dict(d.get("schedule")),
             trail_check_interval_seconds=trail_check_interval_seconds,
             exit_confirmation_windows=exit_confirmation_windows,
+            stop_breach_force_close_count=stop_breach_force_close_count,
+            entry_signals=EntrySignalConfig.from_dict(d.get("entry_signals")),
         )
 
 

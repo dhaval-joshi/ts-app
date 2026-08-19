@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import RedirectResponse, JSONResponse
 
-from . import config
+from . import clock, config
 
 log = logging.getLogger("tradejini.auth")
 
@@ -56,7 +56,7 @@ def check_credentials(username: str, password: str) -> bool:
 
 def create_session() -> str:
     token = secrets.token_urlsafe(32)
-    _sessions[token] = datetime.now() + timedelta(days=config.SESSION_TTL_DAYS)
+    _sessions[token] = clock.now() + timedelta(days=config.SESSION_TTL_DAYS)
     _prune_expired()
     return token
 
@@ -72,14 +72,14 @@ def is_valid_session(token: str | None) -> bool:
     expiry = _sessions.get(token)
     if expiry is None:
         return False
-    if datetime.now() > expiry:
+    if clock.now() > expiry:
         _sessions.pop(token, None)
         return False
     return True
 
 
 def _prune_expired():
-    now = datetime.now()
+    now = clock.now()
     expired = [t for t, exp in _sessions.items() if now > exp]
     for t in expired:
         _sessions.pop(t, None)

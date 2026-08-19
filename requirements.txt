@@ -1,7 +1,12 @@
-starlette>=0.38
-uvicorn>=0.30
-wsproto>=1.2
-httpx>=0.27
-websocket-client>=1.8
-pyotp>=2.9
-python-dotenv>=1.0
+starlette==1.6.0
+uvicorn==0.52.3
+wsproto==1.3.2
+httpx==0.28.1
+websocket-client==1.9.0
+pyotp==2.10.0
+python-dotenv==1.2.2
+# ZoneInfo needs a tz database it can read -- Windows has none at all, and a
+# slim Linux container image isn't guaranteed to ship one either. The pip
+# package is ~350KB and makes backend/clock.py work identically everywhere,
+# regardless of what the host OS happens to provide.
+tzdata==2026.3

@@ -47,6 +47,9 @@
   <button class="nav-link relative flex items-center gap-1.5 px-4 py-2 text-sm rounded-[0.3rem] text-slate-500" data-nav="advanced" onclick="switchSection('advanced')">
     <span class="material-symbols-outlined !text-lg">bolt</span>Advanced OMS
   </button>
+  <button class="nav-link relative flex items-center gap-1.5 px-4 py-2 text-sm rounded-[0.3rem] text-slate-500" data-nav="journal" onclick="switchSection('journal')">
+    <span class="material-symbols-outlined !text-lg">history_edu</span>Journal
+  </button>
   <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
     <span id="heartbeatWrap" class="flex items-center gap-2" title="System health"><span id="heartbeatDot" class="w-2 h-2 rounded-full bg-green-500"></span> system</span>
     <span class="flex items-center gap-2"><span id="streamDot" class="w-2 h-2 rounded-full bg-red-500"></span> live feed</span>
@@ -268,6 +271,24 @@
                 <input name="trail_check_interval_custom" type="number" min="1" step="1" class="field-input" />
               </div>
             </div>
+            <div class="mt-4">
+              <label class="field-label">Exit confirmation (consecutive evaluations)</label>
+              <input name="exit_confirmation_windows" type="number" min="1" step="1" value="1" class="field-input w-40" />
+              <p class="text-xs text-slate-400 mt-1">
+                A crossed stop/target must stay crossed for this many evaluations in a row before the
+                close actually fires -- 1 = fire on the first crossing (default). Each evaluation is one
+                raw tick if the interval above is Off, or one window close otherwise.
+              </p>
+            </div>
+            <div class="mt-4">
+              <label class="field-label">Force-close after N stop breaches (0 = off)</label>
+              <input name="stop_breach_force_close_count" type="number" min="0" step="1" value="0" class="field-input w-40" />
+              <p class="text-xs text-slate-400 mt-1">
+                If the stop is hit and recovers (without closing) this many times, the NEXT hit
+                force-closes immediately -- for a stop that keeps getting tested and bouncing back
+                rather than clearly holding. Stop side only.
+              </p>
+            </div>
           </fieldset>
 
           <button type="button" onclick="document.getElementById('strategyForm').requestSubmit()"
@@ -389,6 +410,21 @@
       <div class="grid grid-cols-7 gap-1.5" id="advancedCalendarWeekdays"></div>
       <div class="grid grid-cols-7 gap-1.5 mt-1.5" id="advancedCalendarGrid"></div>
     </div>
+  </div>
+
+  <!-- ============================== Journal ============================== -->
+  <div id="section-journal" class="section-panel hidden">
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-xl font-semibold">Trading Journal</h1>
+    </div>
+    <p class="text-xs text-slate-400 mb-4">
+      A durable record of every closed cycle and order -- kept independently of the Program or
+      Strategy that created it, so deleting or editing one later never loses what actually happened.
+      Regular OMS orders that belong to an Advanced OMS Program appear inside their cycle, not
+      listed separately here.
+    </p>
+    <div id="journalFilterForm" class="flex flex-wrap items-end gap-3 mb-4"></div>
+    <div id="journalList" class="flex flex-col gap-2"></div>
   </div>
 
 </main>
@@ -588,6 +624,7 @@
 <script src="/static/order.js?v=1787400000"></script>
 <script src="/static/strategies.js?v=1787400000"></script>
 <script src="/static/programs.js?v=1787400000"></script>
+<script src="/static/journal.js?v=1787400000"></script>
 <script src="/static/tabs.js?v=1787400000"></script>
 </body>
 </html>

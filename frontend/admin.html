@@ -41,6 +41,9 @@
     <button class="admin-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-admin-tab="failures" onclick="switchAdminTab('failures')">
       <span class="material-symbols-outlined !text-lg">error</span>Failures
     </button>
+    <button class="admin-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-admin-tab="reconcile" onclick="switchAdminTab('reconcile')">
+      <span class="material-symbols-outlined !text-lg">fact_check</span>Reconciliation
+    </button>
   </div>
 
   <div id="admintab-general" class="admin-tab-panel">
@@ -64,6 +67,29 @@
     <p class="text-xs text-slate-400 mb-4">A centralized, filterable log of operational failures -- broker rejections, price-fetch timeouts, Program orchestration issues -- across both Regular and Advanced OMS.</p>
     <div id="failuresFilterForm" class="grid sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4"></div>
     <div id="failuresList" class="flex flex-col gap-2"></div>
+  </div>
+
+  <div id="admintab-reconcile" class="admin-tab-panel hidden">
+    <h1 class="text-xl font-medium mb-1">Broker reconciliation</h1>
+    <p class="text-xs text-slate-400 mb-4">
+      Checks this app's own records for already-CLOSED live orders against what the broker's own
+      order history actually says happened, catching any drift after the fact. Currently-open
+      positions are never touched here -- that's the live reconcile loop's job, continuously. A
+      Preview run finds and reports discrepancies but corrects nothing; only an explicit Apply run
+      writes anything, and every correction is recorded as a visible amendment on that order's
+      Journal factsheet, never a silent rewrite.
+    </p>
+    <div class="flex flex-wrap items-center gap-2 mb-4">
+      <button type="button" onclick="runReconciliation(true)" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-blue-600 text-white shadow-sm hover:bg-blue-700">
+        <span class="material-symbols-outlined !text-base">visibility</span>Run reconciliation (preview)
+      </button>
+      <button type="button" id="reconcileApplyBtn" onclick="runReconciliation(false)" disabled class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium bg-red-600 text-white shadow-sm hover:bg-red-700 disabled:opacity-40 disabled:pointer-events-none">
+        <span class="material-symbols-outlined !text-base">edit_note</span>Apply corrections
+      </button>
+    </div>
+    <div id="reconcileCurrentReport"></div>
+    <h2 class="text-sm font-medium text-slate-500 mt-6 mb-2">Recent runs</h2>
+    <div id="reconcileHistory" class="flex flex-col gap-2"></div>
   </div>
 
 </main>

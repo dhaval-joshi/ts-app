@@ -32,7 +32,8 @@ Tradejini call signature at all) -- see order_manager.py's
 create_and_place_order_with_strategy for the exact call site.
 """
 import logging
-from datetime import datetime
+
+from . import clock
 
 log = logging.getLogger("tradejini.paper_broker")
 
@@ -123,7 +124,7 @@ class PaperBrokerClient:
         record["status"] = "completed"
         record["avgPrice"] = price
         record["fillQty"] = qty
-        record["filled_at"] = datetime.now().isoformat()
+        record["filled_at"] = clock.now_iso()
 
     def _maybe_fill_entry(self, record: dict):
         """Despite the name, this fills ANY plain order this class ever

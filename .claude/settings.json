@@ -10,10 +10,12 @@
       "Edit(./secrets/**)"
     ],
     "ask": [
-      "Bash(python backend/main.py*)",
-      "Bash(python3 backend/main.py*)",
+      // "Bash(python backend/main.py*)",
+      // "Bash(python3 backend/main.py*)",
       "Bash(uvicorn*)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git commit)",
+      "Bash(git push -u origin refs/refs/changes/*)"
     ]
   }
 }

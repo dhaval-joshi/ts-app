@@ -31,6 +31,13 @@ class TradejiniApiError(Exception):
 
 
 class TradejiniClient:
+    broker_id = "tradejini"  # a plain class-level constant is fine -- there's exactly one broker
+                              # today; this exists so order_manager.py/program_manager.py can stamp
+                              # broker_id onto orders/Programs via getattr(client, "broker_id", None)
+                              # without caring whether it's live Tradejini or (eventually) something
+                              # else, and so PaperBrokerClient (which deliberately has none) reads as
+                              # None everywhere rather than needing a special case at each call site
+
     def __init__(self):
         self.api_key = config.TRADEJINI_API_KEY
         self._access_token: Optional[str] = None

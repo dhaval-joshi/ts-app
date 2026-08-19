@@ -4,11 +4,16 @@ callbacks from that thread. This wraps it so the rest of the app -- which is
 asyncio-based -- can just `await stream_queue.get()` for events, regardless
 of which thread they originated on.
 
-We ONLY ever subscribe to:
+We subscribe to:
   - the 'events' channel (orders/positions/trades) -- always on, this is how
     the order manager knows an entry filled, a leg got hit, etc.
   - L1 price ticks, and only for symbols that currently have trailing
-    enabled on an open order. Nothing else. No charts, no depth, no greeks.
+    enabled on an open order (or an on-demand price/market-snapshot fetch
+    in flight -- see OrderManager.fetch_live_price/fetch_market_snapshot).
+  - Greeks, but only as one-shot snapshots (subscribe_greeks_snapshot),
+    right before a candidate Advanced OMS cycle starts, for
+    entry_signals.py's optional IV-rank gate -- never a persistent
+    subscription. Still no charts, no depth (L5), no streaming OHLC.
 """
 import asyncio
 import logging
@@ -105,6 +110,26 @@ class StreamManager:
             else:
                 log.info("Unsubscribing L1 -- no symbols currently need it.")
                 self._nx.unsubscribeL1()
+
+    def subscribe_greeks_snapshot(self, symbols: set[str]):
+        """One-shot: fires a 'greeks-snapshot' request for these symbols and
+        lets the broker reply on its own -- unlike set_trailing_symbols
+        above, this is NOT a persistent subscription this object tracks or
+        re-sends; the SDK's "-snapshot" request types are single-pull by
+        design (see nxtradstream.subscribeGreeksSnapShot). Used only by
+        entry_signals' IV-rank gate, right before a candidate cycle starts
+        -- see OrderManager.fetch_greeks_snapshot. Same string-symbol
+        format as set_trailing_symbols (e.g. "12345_NSE") -- the wire
+        protocol treats that whole string as the subscription token, same
+        as every existing L1 call in this module.
+
+        No-ops silently if not connected -- the caller
+        (fetch_greeks_snapshot) already has its own timeout, so a
+        temporarily-down stream just times out that call rather than
+        needing a special case here."""
+        if self._nx and self._connected and symbols:
+            log.info("Requesting Greeks snapshot for %d symbol(s): %s", len(symbols), sorted(symbols))
+            self._nx.subscribeGreeksSnapShot(list(symbols))
 
     async def periodic_resubscribe_loop(self):
         """A second, independent safety net on top of set_trailing_symbols

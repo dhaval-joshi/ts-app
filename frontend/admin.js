@@ -48,6 +48,7 @@ function applyAdvAccent(name) {
   renderAccentPicker();
   loadPortfolioSafeguardsForm();
   loadFailuresTab();
+  loadReconcileTab();
 })();
 
 const ADMIN_TAB_ACTIVE_CLASSES = ["text-blue-600", "border-blue-600"];
@@ -196,7 +197,7 @@ function failureRowHtml(f) {
       <div class="flex items-start justify-between gap-3">
         <div>
           <span class="inline-flex items-center h-5 px-2 rounded-[0.3rem] text-[10px] font-medium uppercase tracking-wide bg-red-50 text-red-700 border border-red-200">${f.category}</span>
-          <span class="text-xs text-slate-400 ml-2">${f.ts.replace("T", " ")}${orderBit}${programBit}</span>
+          <span class="text-xs text-slate-400 ml-2">${f.ts.replace("T", " ").replace(/\+\d{2}:\d{2}$/, "")}${orderBit}${programBit}</span>
         </div>
         ${hasDetail ? `<button type="button" onclick="document.getElementById('${detailId}').classList.toggle('hidden')" class="text-xs text-blue-600 hover:underline shrink-0">Details</button>` : ""}
       </div>
@@ -207,6 +208,126 @@ function failureRowHtml(f) {
           ${f.response ? `<div><span class="text-slate-400">response:</span> ${JSON.stringify(f.response)}</div>` : ""}
         </div>` : ""}
     </div>`;
+}
+
+// -------------------------------------------------------------- Reconciliation
+//
+// Preview (dry_run=true) always runs first and corrects nothing; Apply
+// (dry_run=false) is only enabled after a preview has run THIS session, so
+// there's always a look-before-you-write step on live-money records. See
+// backend/broker_reconcile.py's module docstring for the full design.
+
+async function loadReconcileTab() {
+  await renderReconcileHistory();
+}
+
+async function runReconciliation(dryRun) {
+  try {
+    const report = await api("/api/reconcile", { method: "POST", body: JSON.stringify({ dry_run: dryRun }) });
+    renderReconcileReport(report);
+    const applyBtn = document.getElementById("reconcileApplyBtn");
+    if (dryRun) {
+      if (applyBtn) applyBtn.disabled = false;
+      toast("Preview complete -- review the findings below before applying.");
+    } else {
+      if (applyBtn) applyBtn.disabled = true;
+      toast("Reconciliation applied.");
+    }
+    await renderReconcileHistory();
+  } catch (e) {
+    if (e.message && e.message.includes("already in progress")) {
+      toast("A reconciliation run is already in progress -- try again shortly.", "error");
+    } else {
+      toast("Reconciliation failed: " + e.message, "error");
+    }
+  }
+}
+
+function reconcileVerdictClass(v) {
+  if (v === "corrected") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (v === "differs") return "bg-red-50 text-red-700 border-red-200";
+  if (v === "match") return "bg-green-50 text-green-700 border-green-200";
+  return "bg-slate-100 text-slate-500 border-slate-200"; // unverifiable / not_applicable
+}
+
+function renderReconcileReport(report) {
+  const el = document.getElementById("reconcileCurrentReport");
+  if (!el) return;
+  const brokerSections = Object.entries(report.brokers || {}).map(([brokerId, b]) => {
+    if (b.error) {
+      return `<div class="border border-red-200 bg-red-50 rounded-[0.3rem] p-3 text-sm text-red-700 mb-3">Broker "${brokerId}": ${b.error}</div>`;
+    }
+    const c = b.counts || {};
+    const countsHtml = `
+      <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center mb-3">
+        ${["checked", "match", "corrected", "differs", "unverifiable", "not_applicable"].map((k) => `
+          <div class="border border-slate-200 rounded-[0.3rem] p-2">
+            <div class="text-[10px] uppercase tracking-wide text-slate-400">${k.replace("_", " ")}</div>
+            <div class="text-sm font-semibold text-slate-900">${c[k] ?? 0}</div>
+          </div>`).join("")}
+      </div>`;
+    const notable = (b.findings || []).filter((f) => f.verdict !== "match" && f.verdict !== "not_applicable");
+    const findingsHtml = notable.length
+      ? notable.map((f) => `
+          <div class="border border-slate-200 rounded-[0.3rem] p-2.5 mb-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-mono text-slate-700">${f.order_id}</span>
+              <span class="inline-flex items-center h-5 px-2 rounded-[0.3rem] text-[10px] font-medium uppercase tracking-wide border ${reconcileVerdictClass(f.verdict)}">${f.verdict}</span>
+            </div>
+            ${(f.diffs || []).map((d) => `<div class="text-[11px] text-slate-500 mt-1">${d.path}: ${d.local} → ${d.broker}</div>`).join("")}
+            ${f.note ? `<div class="text-[11px] text-slate-400 mt-1">${f.note}</div>` : ""}
+          </div>`).join("")
+      : `<div class="text-xs text-slate-400">No discrepancies found.</div>`;
+    const orphansHtml = (b.orphans || []).length
+      ? `<div class="mt-3"><div class="text-xs font-medium text-amber-700 mb-1">Orphans -- broker-side records with no matching local order</div>
+          ${b.orphans.map((o) => `<div class="text-[11px] text-amber-700">${o.source}: ${o.broker_order_id} (${o.sym_id || "?"}, ${o.status || "?"})</div>`).join("")}
+         </div>` : "";
+    const staleHtml = (b.stale_open_orders || []).length
+      ? `<div class="mt-3"><div class="text-xs font-medium text-red-700 mb-1">Still open locally, but past expiry -- check for a missed settlement</div>
+          ${b.stale_open_orders.map((s) => `<div class="text-[11px] text-red-700">${s.order_id}: ${s.sym_id} (expired ${s.expiry})</div>`).join("")}
+         </div>` : "";
+    return `
+      <div class="border border-slate-200 rounded-xl p-4 mb-3">
+        <div class="text-sm font-medium text-slate-900 mb-2">Broker: ${brokerId}</div>
+        ${countsHtml}
+        ${findingsHtml}
+        ${orphansHtml}
+        ${staleHtml}
+      </div>`;
+  }).join("");
+  el.innerHTML = `
+    <div class="flex items-center gap-2 mb-3">
+      <span class="inline-flex items-center h-5 px-2 rounded-[0.3rem] text-[10px] font-medium uppercase tracking-wide border ${report.dry_run ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-green-50 text-green-700 border-green-200"}">${report.dry_run ? "Preview — nothing written" : "Applied"}</span>
+      <span class="text-xs text-slate-400">${(report.started_at || "").replace("T", " ")} · run ${report.run_id}</span>
+    </div>
+    ${brokerSections}`;
+}
+
+async function renderReconcileHistory() {
+  const el = document.getElementById("reconcileHistory");
+  if (!el) return;
+  try {
+    const reports = await api("/api/reconcile-reports?limit=20");
+    el.innerHTML = reports.length
+      ? reports.map((r) => `
+          <button type="button" onclick="showReconcileReport('${r.run_id}')" class="text-left border border-slate-200 rounded-[0.3rem] p-2.5 hover:border-blue-300 flex items-center justify-between gap-2">
+            <span class="text-xs text-slate-700">${(r.started_at || "").replace("T", " ")}</span>
+            <span class="inline-flex items-center h-5 px-2 rounded-[0.3rem] text-[10px] font-medium uppercase tracking-wide border ${r.dry_run ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-green-50 text-green-700 border-green-200"}">${r.dry_run ? "preview" : "applied"}</span>
+          </button>`).join("")
+      : `<div class="text-xs text-slate-400">No reconciliation runs yet.</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="text-xs text-red-600">Failed to load history: ${e.message}</div>`;
+  }
+}
+
+async function showReconcileReport(runId) {
+  try {
+    const report = await api(`/api/reconcile-reports/${runId}`);
+    renderReconcileReport(report);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) {
+    toast("Couldn't load report: " + e.message, "error");
+  }
 }
 
 // -------------------------------------------------------- Portfolio Safeguards

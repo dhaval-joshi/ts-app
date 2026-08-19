@@ -10,10 +10,9 @@ Lines file (easy to tail, grep, or load a line at a time -- no risk of one
 corrupt write breaking the whole file the way a single JSON array would).
 """
 import json
-import time
 from pathlib import Path
 
-from . import config
+from . import clock, config
 
 FAILURES_PATH = config.DATA_DIR / "failures.jsonl"
 MAX_TAIL_BYTES = 2_000_000  # only read the last ~2MB when tailing a big file
@@ -31,7 +30,7 @@ def log_failure(*, category: str, order_id: str | None, message: str,
     order-level failure that happens to belong to a Program's leg, via
     order.get("program_id"))."""
     entry = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ts": clock.now_iso(),
         "category": category,       # e.g. "entry_rejected", "trailing_failed", "square_off_failed"
         "order_id": order_id,
         "program_id": program_id,

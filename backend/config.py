@@ -41,11 +41,25 @@ ARCHIVE_DIR = ORDERS_DIR / "archive"
 STRATEGIES_DIR = DATA_DIR / "strategies"
 PROGRAMS_DIR = DATA_DIR / "programs"
 RISK_GROUPS_DIR = DATA_DIR / "risk_groups"
+# Durable, outside-the-live-record snapshots (factsheets) -- survive Program/order deletion or
+# editing, unlike program["cycles"] (capped, lives inside the Program's own file) -- see factsheet.py.
+FACTSHEETS_DIR = DATA_DIR / "factsheets"
+FACTSHEETS_PROGRAMS_DIR = FACTSHEETS_DIR / "programs"  # <program_id>/<cycle_id>.json
+FACTSHEETS_ORDERS_DIR = FACTSHEETS_DIR / "orders"        # <order_id>.json
+RECONCILE_REPORTS_DIR = DATA_DIR / "reconcile_reports"  # broker_reconcile.py's run reports
+# One small JSON file per trading day (date -> {"vix_close_seen": float}) -- NOT a historical-data
+# pipeline, just a forward-only daily scalar log that lets entry_signals.vix_percentile_gate build
+# real IV-percentile context over a few weeks. See signal_history.py.
+SIGNAL_HISTORY_DIR = DATA_DIR / "signal_history"
 ORDERS_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 STRATEGIES_DIR.mkdir(parents=True, exist_ok=True)
 PROGRAMS_DIR.mkdir(parents=True, exist_ok=True)
 RISK_GROUPS_DIR.mkdir(parents=True, exist_ok=True)
+FACTSHEETS_PROGRAMS_DIR.mkdir(parents=True, exist_ok=True)
+FACTSHEETS_ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+RECONCILE_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+SIGNAL_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 # Market holidays -- a JSON array of "YYYY-MM-DD" strings, e.g. ["2026-10-21", ...].
 # Used by the Advanced OMS's expiry-selection logic (program_safeguards.py /

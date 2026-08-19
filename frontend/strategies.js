@@ -78,6 +78,8 @@ function buildPayload(fd) {
       at: fd.get("at") || null,
     },
     trail_check_interval_seconds: readTrailIntervalFromForm(fd),  // shared with programs.js
+    exit_confirmation_windows: num(fd.get("exit_confirmation_windows")) || 1,
+    stop_breach_force_close_count: num(fd.get("stop_breach_force_close_count")) ?? 0,
   };
 }
 
@@ -120,6 +122,8 @@ function applyStrategy(s) {
   timeExitMode.dispatchEvent(new Event("change"));
 
   applyTrailIntervalToForm(s.trail_check_interval_seconds || 0);
+  strategyForm.exit_confirmation_windows.value = s.exit_confirmation_windows || 1;
+  strategyForm.stop_breach_force_close_count.value = s.stop_breach_force_close_count || 0;
 }
 
 // ------------------------------------------------------------ list view

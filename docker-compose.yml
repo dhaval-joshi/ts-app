@@ -1,0 +1,22 @@
+# NOT run or smoke-tested as part of this round -- see the Dockerfile's
+# header comment and the README's deployment runbook section.
+#
+# Deliberately exactly one service, one replica -- see Dockerfile and
+# AGENTS.md for why this app cannot safely run as more than one process.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # named volume, not a bind mount -- data/ must be writable at every
+      # subdirectory (atomic writes create their .tmp file next to the
+      # target), and this is the ONLY copy of all trading history. Back it
+      # up; nothing in the app does that for you.
+      - trading_data:/app/data
+
+volumes:
+  trading_data:

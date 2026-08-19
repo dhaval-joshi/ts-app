@@ -35,6 +35,27 @@ def save_order(order: dict) -> None:
     _atomic_write(order_path(order["order_id"]), order)
 
 
+def save_order_in_place(order: dict) -> bool:
+    """Like save_order, but writes to WHICHEVER of the active or archive
+    folder the order's file currently lives in, instead of always the
+    active one. save_order alone would silently resurrect a duplicate:
+    correcting an already-archived order with plain save_order() writes a
+    SECOND copy into the active folder while the archived one stays put,
+    and on next boot list_orders()/list_archived_orders() both return it
+    -- exactly the duplicate-orders bug class AGENTS.md documents. Used
+    by broker_reconcile.py, which operates on already-terminal orders
+    that may well be archived by the time a reconciliation pass reaches
+    them. Returns False if the order isn't found in either location."""
+    order_id = order["order_id"]
+    if archive_order_path(order_id).exists():
+        _atomic_write(archive_order_path(order_id), order)
+        return True
+    if order_path(order_id).exists():
+        _atomic_write(order_path(order_id), order)
+        return True
+    return False
+
+
 def load_order(order_id: str) -> Optional[dict]:
     p = order_path(order_id)
     if not p.exists():
@@ -272,3 +293,109 @@ def load_app_settings() -> dict:
 
 def save_app_settings(data: dict) -> None:
     _atomic_write(config.DATA_DIR / "app_settings.json", data)
+
+
+# ------------------------------------------------------------- factsheets --
+#
+# Durable, outside-the-live-record snapshots -- see factsheet.py for the
+# actual content/amendment logic; this is just the disk I/O, same
+# separation of concerns as every other entity in this file (all disk
+# access stays in store.py, factsheet.py never touches a Path directly).
+
+def factsheet_cycle_path(program_id: str, cycle_id: str) -> Path:
+    return config.FACTSHEETS_PROGRAMS_DIR / program_id / f"{cycle_id}.json"
+
+
+def factsheet_order_path(order_id: str) -> Path:
+    return config.FACTSHEETS_ORDERS_DIR / f"{order_id}.json"
+
+
+def save_factsheet(path: Path, data: dict) -> None:
+    _atomic_write(path, data)
+
+
+def load_factsheet(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def list_cycle_factsheet_paths(program_id: Optional[str] = None) -> list[Path]:
+    """Lists factsheet file PATHS only (never parses every file -- the
+    caller decides which ones, if any, are actually worth loading)."""
+    if program_id:
+        program_dir = config.FACTSHEETS_PROGRAMS_DIR / program_id
+        return sorted(program_dir.glob("*.json")) if program_dir.exists() else []
+    return sorted(config.FACTSHEETS_PROGRAMS_DIR.glob("*/*.json"))
+
+
+def list_order_factsheet_paths() -> list[Path]:
+    """Same "paths only" contract as list_cycle_factsheet_paths -- used by
+    factsheet.list_journal_entries() for the Regular OMS side of the
+    journal."""
+    return sorted(config.FACTSHEETS_ORDERS_DIR.glob("*.json"))
+
+
+# --------------------------------------------------------- reconcile reports --
+
+def _reconcile_report_path(run_id: str) -> Path:
+    return config.RECONCILE_REPORTS_DIR / f"{run_id}.json"
+
+
+def save_reconcile_report(report: dict) -> None:
+    _atomic_write(_reconcile_report_path(report["run_id"]), report)
+
+
+def load_reconcile_report(run_id: str) -> Optional[dict]:
+    p = _reconcile_report_path(run_id)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def list_reconcile_reports(limit: int = 50) -> list[dict]:
+    reports = []
+    for p in config.RECONCILE_REPORTS_DIR.glob("*.json"):
+        try:
+            with open(p) as f:
+                reports.append(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            continue
+    reports.sort(key=lambda r: r.get("started_at", ""), reverse=True)
+    return reports[:limit]
+
+
+# --------------------------------------------------------- signal history --
+# One small file per trading day -- see config.SIGNAL_HISTORY_DIR's own
+# comment for why this is deliberately NOT a historical-data pipeline.
+
+def _signal_history_path(date_str: str) -> Path:
+    return config.SIGNAL_HISTORY_DIR / f"{date_str}.json"
+
+
+def save_signal_snapshot(date_str: str, data: dict) -> None:
+    _atomic_write(_signal_history_path(date_str), data)
+
+
+def load_signal_snapshot(date_str: str) -> Optional[dict]:
+    p = _signal_history_path(date_str)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def list_recent_signal_snapshots(days: int = 20) -> list[dict]:
+    """Most recent snapshots first, newest-`days`-worth -- entry_signals'
+    percentile gate reads this to build its own recent-history window."""
+    snapshots = []
+    for p in config.SIGNAL_HISTORY_DIR.glob("*.json"):
+        try:
+            with open(p) as f:
+                snapshots.append(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            continue
+    snapshots.sort(key=lambda s: s.get("date", ""), reverse=True)
+    return snapshots[:days]

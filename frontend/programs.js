@@ -143,7 +143,10 @@ function activeLegsInnerHtml(activeLegs) {
           // not a continuously-updating figure. Labeling it "(live)" here
           // would be actively misleading about what the number represents.
           const pnlLabel = isRealized ? " (closed)" : isClosing ? " (at trigger, pending confirmation)" : " (live)";
-          const pnlText = typeof p === "number" ? `${signed(p)}${pnlLabel}` : "unknown";
+          // no realized_pct field exists (see order_manager._finalize_realized_pnl) -- percentage
+          // is only ever meaningful pre-close, same as app.js's pnlCellHtml for Regular OMS.
+          const pnlPct = !isRealized && o.pnl && typeof o.pnl.unrealized_pct === "number" ? ` (${signed(o.pnl.unrealized_pct)}%)` : "";
+          const pnlText = typeof p === "number" ? `${signed(p)}${pnlPct}${pnlLabel}` : "unknown";
           const pnlCls = typeof p === "number" ? pnlColorClass(p) : "text-slate-400";
           return `
           <div class="border border-slate-200 rounded-[0.3rem] p-2.5">
@@ -152,6 +155,7 @@ function activeLegsInnerHtml(activeLegs) {
             ${o.status === "watching" && o.last_ltp != null ? `<div class="text-xs text-slate-400">Live price ${fmt(o.last_ltp)}</div>` : ""}
             <div class="text-xs font-medium ${pnlCls} mt-0.5">${pnlText}</div>
             <div class="text-[11px] text-slate-400 mt-1">SL ${fmt(o.stop && o.stop.current_trig_price)} · Target ${fmt(o.target && o.target.current_trig_price)} <span class="text-slate-300">(live, in-memory)</span></div>
+            ${o.status === "watching" ? `<button type="button" onclick="closeLeg('${o.order_id}')" class="mt-1.5 text-[11px] text-red-600 hover:underline">Close this leg</button>` : ""}
           </div>`;
         }).join("")}
         </div>
@@ -249,7 +253,7 @@ function programCardHtml(program, allOrders, opts = {}) {
       <button type="button" onclick="toggleProgramLogs('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-text-600 shadow-sm adv-accent-hover-bg-50">Logs (${(program.logs || []).length})</button>
     </div>
     <div class="logs hidden mt-3 pt-3 border-t border-slate-200 text-xs text-slate-400 max-h-36 overflow-y-auto scrollbars space-y-1" id="program-logs-${cfg.program_id}">
-      ${(program.logs || []).slice().reverse().map((l) => `<div>${l.ts.replace("T", " ")} — ${l.msg}</div>`).join("")}
+      ${(program.logs || []).slice().reverse().map((l) => `<div>${l.ts.replace("T", " ").replace(/\+\d{2}:\d{2}$/, "")} — ${l.msg}</div>`).join("")}
     </div>
   </div>`;
 }
@@ -276,6 +280,22 @@ async function resumeProgram(id) {
     loadAdvancedOms();
   } catch (e) {
     toast("Failed to resume: " + e.message, "error");
+  }
+}
+
+async function closeLeg(orderId) {
+  // Market-only, deliberately -- unlike Regular OMS's own close controls
+  // (which offer an optional limit price via a dedicated input on the full
+  // order card), this compact leg card has no room for that and doesn't
+  // need it: a single leg being closed early is exactly the kind of
+  // "get me out now" action a limit price would work against.
+  if (!confirm("Close this leg now at market? The Program keeps running -- once both legs of this cycle are closed, it wraps up and the Program moves on to its next cycle normally.")) return;
+  try {
+    await api(`/api/orders/${orderId}/close`, { method: "POST", body: JSON.stringify({}) });
+    toast("Leg close requested.");
+    loadAdvancedOms();
+  } catch (e) {
+    toast("Failed to close leg: " + e.message, "error");
   }
 }
 
@@ -383,14 +403,16 @@ function readTrailIntervalFromForm(fd) {
 
 function programFormHtml(p) {
   const cfg = p ? p.config : {
-    name: "", index_id: "", risk_group_id: null, product: "intraday", mode: "live",
+    name: "", index_id: "", risk_group_id: null, product: "intraday", mode: "live", broker_id: "tradejini",
     min_working_days_to_expiry: 2, lots_per_leg: 1, sizing_mode: "lots", capital_per_leg: null,
     stop: { offset_mode: "percent", trig_offset: 20, limit_offset: 0, trailing: { enabled: true, trail_by: 5, activation_offset: 0 } },
     target: { offset_mode: "percent", trig_offset: 40, limit_offset: 0, trailing: { enabled: true, trail_by: 10, activation_offset: 0 } },
     time_exit: { mode: "intraday_window", window_start: "15:10", window_end: "15:15", at: null },
     safeguards: { consecutive_loss_limit: 3, daily_loss_amount: 5000, max_cycles_per_day: 5, cooldown_minutes: 5 },
     schedule: { continuous: false, start_time: "09:15", end_time: "14:55", days: "all", inter_cycle_delay_seconds: 0 },
-    trail_check_interval_seconds: 0, exit_confirmation_windows: 1,
+    trail_check_interval_seconds: 0, exit_confirmation_windows: 1, stop_breach_force_close_count: 0,
+    entry_signals: { enabled: false, max_vix: null, max_oi_chng_pct: null, max_session_range_pct: null,
+      max_vix_percentile: null, vix_percentile_min_days: 10, max_iv_session_rank_pct: null, on_greeks_unverifiable: "allow" },
   };
   const indexOptions = indicesCache.map((i) => `<option value="${i.index_id}" ${i.index_id === cfg.index_id ? "selected" : ""}>${i.disp_name}</option>`).join("");
   const riskGroupOptions = allRiskGroups.map((g) => `<option value="${g.risk_group_id}" ${g.risk_group_id === cfg.risk_group_id ? "selected" : ""}>${g.name}</option>`).join("");
@@ -424,6 +446,11 @@ function programFormHtml(p) {
           <select name="mode" class="js-enhance-select field-input">
             <option value="live" ${cfg.mode === "live" ? "selected" : ""}>Live -- real orders</option>
             <option value="paper" ${cfg.mode === "paper" ? "selected" : ""}>Paper -- simulated, no real orders</option>
+          </select>
+        </div>
+        <div><label class="field-label">Broker</label>
+          <select name="broker_id" class="js-enhance-select field-input">
+            <option value="tradejini" ${!cfg.broker_id || cfg.broker_id === "tradejini" ? "selected" : ""}>Tradejini</option>
           </select>
         </div>
         <div><label class="field-label">Min working days to expiry</label><input name="min_working_days_to_expiry" type="number" min="0" step="1" value="${cfg.min_working_days_to_expiry}" class="field-input" /></div>
@@ -540,6 +567,39 @@ function programFormHtml(p) {
     </fieldset>
 
     <fieldset class="border border-slate-200 rounded-xl p-4">
+      <legend class="px-2 text-sm font-medium adv-accent-text-700">Entry signals</legend>
+      <p class="text-xs text-slate-400 mb-3">Optional live-market preconditions checked right before a cycle actually starts -- a different question from Schedule above (WHEN is a cycle eligible) and Safeguards (whether this Program should STOP due to bad performance): this asks whether conditions right now actually favor entering a long straddle. A blocked entry is non-halting -- the Program keeps retrying automatically as conditions change. Off by default; each threshold below is independently optional on top of the master switch.</p>
+      <label class="flex items-center gap-2 text-sm mb-3 text-slate-700">
+        <input type="checkbox" name="entry_signals_enabled" id="entrySignalsEnabled" ${cfg.entry_signals.enabled ? "checked" : ""}
+          onchange="document.getElementById('entrySignalsFields').classList.toggle('opacity-40', !this.checked); document.getElementById('entrySignalsFields').classList.toggle('pointer-events-none', !this.checked);"
+          class="w-4 h-4" /> Enable entry signal gates
+      </label>
+      <div id="entrySignalsFields" class="${cfg.entry_signals.enabled ? "" : "opacity-40 pointer-events-none"}">
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div><label class="field-label">Max India VIX</label><input name="entry_signals_max_vix" type="number" min="0" step="any" value="${cfg.entry_signals.max_vix ?? ""}" placeholder="e.g. 18 -- blank = off" class="field-input" />
+            <p class="text-[11px] text-slate-400 mt-1">Skip the cycle if India VIX is above this -- premium already expensive for a long-vol entry.</p></div>
+          <div><label class="field-label">Max OI change (%)</label><input name="entry_signals_max_oi_chng_pct" type="number" min="0" step="any" value="${cfg.entry_signals.max_oi_chng_pct ?? ""}" placeholder="e.g. 50 -- blank = off" class="field-input" />
+            <p class="text-[11px] text-slate-400 mt-1">Skip if either leg's Open Interest has already built up more than this % today.</p></div>
+          <div><label class="field-label">Max session range (% of open)</label><input name="entry_signals_max_session_range_pct" type="number" min="0" step="any" value="${cfg.entry_signals.max_session_range_pct ?? ""}" placeholder="e.g. 1.5 -- blank = off" class="field-input" />
+            <p class="text-[11px] text-slate-400 mt-1">Skip once today's (high-low)/open on the underlying already exceeds this -- avoids entering AFTER the day's move already happened.</p></div>
+          <div><label class="field-label">Max VIX percentile</label><input name="entry_signals_max_vix_percentile" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_vix_percentile ?? ""}" placeholder="e.g. 40 -- blank = off" class="field-input" />
+            <p class="text-[11px] text-slate-400 mt-1">Skip unless today's VIX ranks below this percentile of its own recent history (builds up automatically, a small daily snapshot -- needs the minimum days below before it applies).</p></div>
+          <div><label class="field-label">VIX percentile: minimum days of history</label><input name="entry_signals_vix_percentile_min_days" type="number" min="1" step="1" value="${cfg.entry_signals.vix_percentile_min_days ?? 10}" class="field-input" /></div>
+          <div><label class="field-label">Max IV session rank (%)</label><input name="entry_signals_max_iv_session_rank_pct" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_iv_session_rank_pct ?? ""}" placeholder="e.g. 30 -- blank = off" class="field-input" />
+            <p class="text-[11px] text-slate-400 mt-1">Skip unless a leg's live IV ranks below this % of TODAY's own IV range -- needs live Greeks from the broker; entitlement for that channel isn't guaranteed (see the option below).</p></div>
+        </div>
+        <div class="mt-3">
+          <label class="field-label">If Greeks/IV never arrive (entitlement unconfirmed)</label>
+          <select name="entry_signals_on_greeks_unverifiable" class="js-enhance-select field-input w-64">
+            <option value="allow" ${cfg.entry_signals.on_greeks_unverifiable !== "skip" ? "selected" : ""}>Allow the cycle (fail open)</option>
+            <option value="skip" ${cfg.entry_signals.on_greeks_unverifiable === "skip" ? "selected" : ""}>Skip the cycle (fail closed)</option>
+          </select>
+          <p class="text-[11px] text-slate-400 mt-1">Only matters if "Max IV session rank" above is set. Applies only when Greeks didn't arrive from the broker AT ALL within the fetch timeout -- not when they simply say conditions are fine.</p>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="border border-slate-200 rounded-xl p-4">
       <legend class="px-2 text-sm font-medium adv-accent-text-700">Timeframe aggregation &amp; exit confirmation</legend>
       <p class="text-xs text-slate-400 mb-3">Reduces sensitivity to single-tick noise in a choppy market: trailing and the stop/target check re-evaluate on this cadence instead of every raw tick, using the MEDIAN price seen during the window rather than one noisy instant tick. This only changes the DECISION, never execution -- a confirmed trigger still fires a plain market order, same as always. Off (0) = react to every tick, today's exact behavior.</p>
       <div class="grid sm:grid-cols-2 gap-4">
@@ -549,6 +609,11 @@ function programFormHtml(p) {
         <label class="field-label">Exit confirmation (consecutive evaluations)</label>
         <input name="exit_confirmation_windows" type="number" min="1" step="1" value="${cfg.exit_confirmation_windows || 1}" class="field-input w-40" />
         <p class="text-xs text-slate-400 mt-1">A crossed stop/target must stay crossed for this many evaluations in a row before the close actually fires -- 1 = fire on the first crossing (default). Each evaluation is one raw tick if the interval above is Off, or one window close otherwise.</p>
+      </div>
+      <div class="mt-3">
+        <label class="field-label">Force-close after N stop breaches (0 = off)</label>
+        <input name="stop_breach_force_close_count" type="number" min="0" step="1" value="${cfg.stop_breach_force_close_count || 0}" class="field-input w-40" />
+        <p class="text-xs text-slate-400 mt-1">If a leg's stop is hit and recovers (without closing) this many times, the NEXT hit force-closes immediately, skipping exit confirmation for that close -- for a stop that keeps getting tested and bouncing back rather than clearly holding. Stop side only.</p>
       </div>
     </fieldset>
 
@@ -594,6 +659,7 @@ async function submitProgramForm() {
     risk_group_id: fd.get("risk_group_id") || null,
     product: fd.get("product"),
     mode: fd.get("mode") || "live",
+    broker_id: fd.get("broker_id") || "tradejini",
     lots_per_leg: num(fd.get("lots_per_leg")) || 1,
     sizing_mode: fd.get("sizing_mode") || "lots",
     capital_per_leg: num(fd.get("capital_per_leg")),
@@ -639,6 +705,17 @@ async function submitProgramForm() {
     },
     trail_check_interval_seconds: readTrailIntervalFromForm(fd),
     exit_confirmation_windows: num(fd.get("exit_confirmation_windows")) || 1,
+    stop_breach_force_close_count: num(fd.get("stop_breach_force_close_count")) ?? 0,
+    entry_signals: {
+      enabled: fd.get("entry_signals_enabled") === "on",
+      max_vix: num(fd.get("entry_signals_max_vix")),
+      max_oi_chng_pct: num(fd.get("entry_signals_max_oi_chng_pct")),
+      max_session_range_pct: num(fd.get("entry_signals_max_session_range_pct")),
+      max_vix_percentile: num(fd.get("entry_signals_max_vix_percentile")),
+      vix_percentile_min_days: num(fd.get("entry_signals_vix_percentile_min_days")) || 10,
+      max_iv_session_rank_pct: num(fd.get("entry_signals_max_iv_session_rank_pct")),
+      on_greeks_unverifiable: fd.get("entry_signals_on_greeks_unverifiable") || "allow",
+    },
   };
   try {
     if (editingProgramId) {

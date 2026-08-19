@@ -13,9 +13,10 @@
 const SECTION_ACTIVE_CLASSES_BY_NAME = {
   regular: ["bg-blue-600", "text-white", "font-semibold"],
   advanced: ["adv-accent-bg-600", "text-white", "font-semibold"],
+  journal: ["bg-slate-700", "text-white", "font-semibold"],
 };
 const SECTION_INACTIVE_CLASSES = ["text-slate-500"];
-const ALL_SECTION_ACTIVE_CLASSES = ["bg-blue-600", "adv-accent-bg-600", "text-white", "font-semibold"];
+const ALL_SECTION_ACTIVE_CLASSES = ["bg-blue-600", "adv-accent-bg-600", "bg-slate-700", "text-white", "font-semibold"];
 
 function switchSection(name) {
   document.querySelectorAll(".nav-link").forEach((b) => {
@@ -30,6 +31,7 @@ function switchSection(name) {
   document.body.classList.toggle("adv-active", name === "advanced");
   if (name === "portfolio") loadPortfolioSection();
   if (name === "advanced") loadAdvancedOms();
+  if (name === "journal") loadJournalSection();
   // top-level section IS reflected in the URL (bookmarkable "which OMS am
   // I in"); this is deliberately different from the sub-tabs below, which
   // are NOT reflected in the URL at all
@@ -89,7 +91,7 @@ function switchAdvTab(name) {
 (function initialSection() {
   const params = new URLSearchParams(location.search);
   const section = params.get("section");
-  if (section === "advanced" || section === "regular") {
+  if (section === "advanced" || section === "regular" || section === "journal") {
     switchSection(section);
   } else {
     switchSection("portfolio"); // the default landing view for a plain visit to "/"

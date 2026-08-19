@@ -32,6 +32,8 @@ action (not modeled in this module).
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from . import clock
+
 RUNNING = "running"
 HALTED_CONSECUTIVE_LOSS = "halted_consecutive_loss"
 HALTED_DAILY_LOSS = "halted_daily_loss"
@@ -105,7 +107,10 @@ def can_start_new_cycle(
 
     if cooldown_until:
         try:
-            if now < datetime.fromisoformat(cooldown_until):
+            # a stored cooldown_until predating this module's timezone fix is a NAIVE string
+            # that was, in fact, IST wall-clock time -- clock.parse_iso interprets it as such,
+            # rather than raising when compared against an aware `now` below
+            if now < clock.parse_iso(cooldown_until):
                 return False, f"cooling down until {cooldown_until} (max cycles/day throttle)"
         except ValueError:
             pass

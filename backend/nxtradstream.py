@@ -10,6 +10,9 @@ import re
 import os
 import sys
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")  # the exchange's own clock -- see backend/clock.py
 
 CURRENT_VERSION = 1
 PKG_VERSION = '1.0.2'
@@ -35,7 +38,12 @@ def divide(value, divisor=100.0):
 def datefmt(value):
     if value is None:
         return value
-    date_time = datetime.fromtimestamp(value)
+    # explicit tz=_IST, not the host's local zone -- this decodes the exchange's own
+    # last-traded-time field, and NSE/BSE trade in IST regardless of where this process
+    # runs. Passing no tz would silently return the host's local wall-clock reading of
+    # this instant instead, which is wrong the moment the host isn't IST (e.g. a UTC
+    # cloud VM), and is exactly the field whose whole purpose is cross-checking clocks.
+    date_time = datetime.fromtimestamp(value, tz=_IST)
     return str(date_time)
 
 

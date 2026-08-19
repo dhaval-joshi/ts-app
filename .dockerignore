@@ -1,0 +1,20 @@
+# .venv is a WINDOWS venv (Scripts/, python.exe) -- copying it into a Linux
+# image would poison the build with broken binaries. The image builds its
+# own venv-equivalent from requirements.txt instead.
+.venv/
+
+# data/ is real trading history on the dev machine -- the container gets its
+# own via a mounted volume (see docker-compose.yml), never baked into the image.
+data/
+
+.git/
+.claude/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+
+feature-requests/
+LICENSE
+*.md

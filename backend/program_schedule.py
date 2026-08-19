@@ -17,7 +17,9 @@ conversation that shaped it):
   - "Only on expiry day, 2:30-3:15" -> `days="expiry_day"` combined with
     a narrow same-day window
 """
-from datetime import date, datetime
+from datetime import datetime
+
+from . import clock
 
 
 def can_trade_now(
@@ -62,7 +64,7 @@ def inter_cycle_delay_elapsed(*, last_cycle_closed_at: str | None, delay_seconds
     if not last_cycle_closed_at or delay_seconds <= 0:
         return True
     try:
-        closed_at = datetime.fromisoformat(last_cycle_closed_at)
+        closed_at = clock.parse_iso(last_cycle_closed_at)
     except ValueError:
         return True  # a corrupt/unexpected timestamp shouldn't be able to permanently block trading
     return (now - closed_at).total_seconds() >= delay_seconds

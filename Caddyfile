@@ -1,0 +1,13 @@
+# NOT deployed as part of this round. Replace the placeholder domain below
+# before use -- Caddy requests a real TLS cert for whatever hostname is here.
+#
+# Handles what a plain `docker run -p 8000:8000` doesn't: TLS (automatic,
+# via Let's Encrypt), the /ws upgrade, and the long read timeout /ws needs
+# (its client->server side is a receive_text() that never receives anything
+# -- an idle-timeout proxy would kill it well before the next server->client
+# push, which happens every 2s).
+your-domain.example.com {
+	reverse_proxy localhost:8000 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

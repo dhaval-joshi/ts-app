@@ -31,16 +31,18 @@ keep running their own SL/Target/trailing untouched. Flattening what's
 open is the separate, explicit stop_and_flatten_program() below.
 """
 import asyncio
+import copy
 import dataclasses
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 from types import SimpleNamespace
 
-from . import store, failure_log
+from . import clock, store, failure_log, factsheet
+from . import entry_signals
 from . import program_safeguards as sg
 from . import program_schedule as psched
-from .models import ProgramConfig, RiskGroupConfig, ScheduleConfig, as_dict
+from .models import ProgramConfig, RiskGroupConfig, ScheduleConfig, EntrySignalConfig, as_dict
 from .script_master import ScriptMaster, load_market_holidays
 
 log = logging.getLogger("tradejini.program")
@@ -56,10 +58,14 @@ MARGIN_SAFETY_BUFFER = 1.10  # require available margin >= requiredMargin * this
 STRANGLE_WIDEN_MAX_STEPS = 3  # if the ATM straddle fails the buffered margin check, retry widened into a
                                 # strangle (CE at ATM+N, PE at ATM-N strikes) for N in 1..this, before giving
                                 # up -- see _start_new_cycle and script_master.strike_pair_at_offset
+ENTRY_SIGNAL_FETCH_TIMEOUT_SECONDS = 3.0  # short and separate from the 8.0s used for the essential spot-
+                                # price fetch -- entry_signals inputs are optional/best-effort, and
+                                # _tick_one calls are sequential across every Program (see tick()), so a
+                                # slow/closed feed here must not stall every other Program's tick behind it
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return clock.now_iso()
 
 
 class ProgramManager:
@@ -74,6 +80,12 @@ class ProgramManager:
         self.last_tick_at: datetime | None = None  # set only on a SUCCESSFUL tick() completion -- if this
                                                       # stops advancing, the orchestration loop has silently
                                                       # died or is stuck; see the Heartbeat feature (main.py)
+        self._greeks_unverifiable_logged: dict[str, str] = {}  # program_id -> ISO date already logged today --
+                                                      # in-memory only (same precedent as OrderManager's
+                                                      # _trail_state: harmless to lose on restart, just means
+                                                      # one extra log line the day the app happens to restart),
+                                                      # so entry_signals' Greeks-entitlement-unverified case is
+                                                      # logged once per Program per day, not every 15s tick
 
     def _order_manager_for(self, cfg: dict):
         """Routes to the paper-dedicated OrderManager (backed by
@@ -100,13 +112,23 @@ class ProgramManager:
                                            # Program keeps running/retrying. Loose top-level key, not on
                                            # `runtime`, on purpose -- `runtime` round-trips through
                                            # ProgramRuntimeState (a strict dataclass) on every tick
+            p.setdefault("active_cycle_snapshot", None)  # captured in _start_new_cycle the moment a cycle
+                                           # starts (program config/spot/expiry/strikes/widen offset as
+                                           # they stood then), consumed and cleared in _close_cycle for the
+                                           # cycle factsheet -- same "loose top-level key, not on runtime"
+                                           # reasoning as `alert` above. None whenever no cycle is active.
             # a Program saved before Scheduling/Paper-Live/capital-sizing existed
             # is missing these keys in its config entirely -- backfill sensible
             # defaults so downstream reads never need defensive None-checks
             p["config"].setdefault("schedule", as_dict(ScheduleConfig()))
             p["config"].setdefault("mode", "live")
+            p["config"].setdefault("broker_id", "tradejini")
+            p["config"].setdefault("super_program_id", None)
             p["config"].setdefault("sizing_mode", "lots")
             p["config"].setdefault("capital_per_leg", None)
+            p["config"].setdefault("entry_signals", as_dict(EntrySignalConfig()))  # enabled=False -- a
+                                           # Program saved before this round exists gets today's exact
+                                           # behavior (no gate checked at all) until explicitly opted in
             self._programs[p["config"]["program_id"]] = p
         for g in store.list_risk_groups():
             self._risk_groups[g["risk_group_id"]] = g
@@ -209,9 +231,9 @@ class ProgramManager:
 
     def create_program(self, config_dict: dict) -> dict:
         cfg = ProgramConfig.from_dict(config_dict)
-        rt = sg.ProgramRuntimeState(trading_day=date.today().isoformat())
+        rt = sg.ProgramRuntimeState(trading_day=clock.today().isoformat())
         program = {"config": as_dict(cfg), "runtime": dataclasses.asdict(rt), "logs": [], "cycles": [], "archived": False,
-                    "alert": None, "updated_at": now_iso()}
+                    "alert": None, "active_cycle_snapshot": None, "updated_at": now_iso()}
         self._programs[cfg.program_id] = program
         store.save_program(program)
         return program
@@ -246,6 +268,10 @@ class ProgramManager:
         existing = self._require(program_id)
         config_dict = dict(config_dict)
         config_dict["program_id"] = program_id
+        # super_program_id has no edit-form UI yet (no Super Program entity exists) -- from_dict wipes
+        # any field the incoming dict doesn't explicitly send, so without this an edit made through
+        # today's form would silently clear a future Super Program's link back to its parent
+        config_dict.setdefault("super_program_id", existing["config"].get("super_program_id"))
         cfg = ProgramConfig.from_dict(config_dict)
         existing["config"] = as_dict(cfg)
         existing["updated_at"] = now_iso()
@@ -396,7 +422,7 @@ class ProgramManager:
 
     async def tick(self):
         async with self._lock:
-            now = datetime.now()
+            now = clock.now()
             today_iso = now.date().isoformat()
 
             for program in self._programs.values():
@@ -545,7 +571,7 @@ class ProgramManager:
         # place these values are ever recorded, so it has to happen here
         program.setdefault("cycles", [])
         cycle_number = len(program["cycles"]) + 1
-        program["cycles"].append({
+        cycle_record = {
             "cycle_number": cycle_number,
             "cycle_id": program["runtime"]["active_cycle_id"],
             "started_at": program["runtime"].get("active_cycle_started_at"),
@@ -553,8 +579,19 @@ class ProgramManager:
             "pnl": round(cycle_pnl, 2),
             "pnl_unknown": any_unknown,
             "order_ids": [o["order_id"] for o in legs],
-        })
+        }
+        program["cycles"].append(cycle_record)
         program["cycles"] = program["cycles"][-500:]  # bounded, same reasoning as the 200-cap on logs
+
+        # Consumed by the cycle factsheet write below -- captured once, at _start_new_cycle time, since
+        # neither the config-as-it-was nor the widening outcome survive on their own until now (config
+        # can be edited mid-cycle; the widen offset was otherwise just a local in _start_new_cycle). See
+        # that assignment's own comment. Cleared here regardless of whether a factsheet write follows,
+        # since a stale snapshot from a finished cycle must never be mistaken for an active one.
+        cycle_snapshot = program.get("active_cycle_snapshot")
+        program["active_cycle_snapshot"] = None
+        factsheet.write_cycle_factsheet(program=program, cycle_record=cycle_record, legs=legs,
+                                         snapshot=cycle_snapshot)  # never raises -- see its own docstring
 
         state = sg.ProgramRuntimeState(**program["runtime"])
         s = cfg["safeguards"]
@@ -649,6 +686,73 @@ class ProgramManager:
                             f"need ~₹{buffered_required:.2f} (₹{required:.2f} required + buffer)")
         return True, None
 
+    # ---------------------------------------------------------- entry signals
+
+    async def _fetch_entry_signal_snapshots(self, om, entry_cfg: dict, index_stream_symbol: str,
+                                             ce_stream_symbol: str, pe_stream_symbol: str) -> dict:
+        """Fetches everything entry_signals.evaluate_entry might need,
+        CONCURRENTLY and with a short timeout. These are optional,
+        best-effort inputs to an opt-in precondition, NOT essential-path
+        data like the spot-price fetch above -- _tick_one calls are
+        sequential across every Program (see tick()), so a slow or closed
+        feed here must not stall every other Program's tick behind it."""
+        timeout = ENTRY_SIGNAL_FETCH_TIMEOUT_SECONDS
+        wants_vix = entry_cfg.get("max_vix") is not None or entry_cfg.get("max_vix_percentile") is not None
+        wants_greeks = entry_cfg.get("max_iv_session_rank_pct") is not None
+
+        vix_stream_symbol = None
+        if wants_vix:
+            vix_index = self.script_master.get_index("IDX_-15_NSE")  # India VIX -- filtered out of
+                                                                        # list_indices() by avail_flag=N,
+                                                                        # but directly fetchable by id
+            if vix_index:
+                vix_stream_symbol = f"{vix_index.exc_token}_NSE"
+
+        fetches = {
+            "index_snapshot": om.fetch_market_snapshot(index_stream_symbol, timeout=timeout),
+            "ce_snapshot": om.fetch_market_snapshot(ce_stream_symbol, timeout=timeout),
+            "pe_snapshot": om.fetch_market_snapshot(pe_stream_symbol, timeout=timeout),
+        }
+        if vix_stream_symbol:
+            fetches["vix_ltp"] = om.fetch_live_price(vix_stream_symbol, timeout=timeout)
+        if wants_greeks:
+            fetches["ce_greeks"] = om.fetch_greeks_snapshot(ce_stream_symbol, timeout=timeout)
+            fetches["pe_greeks"] = om.fetch_greeks_snapshot(pe_stream_symbol, timeout=timeout)
+
+        keys = list(fetches.keys())
+        results = await asyncio.gather(*fetches.values())
+        out = dict(zip(keys, results))
+        return {
+            "index_snapshot": out.get("index_snapshot"), "ce_snapshot": out.get("ce_snapshot"),
+            "pe_snapshot": out.get("pe_snapshot"), "vix_ltp": out.get("vix_ltp"),
+            "ce_greeks": out.get("ce_greeks"), "pe_greeks": out.get("pe_greeks"),
+        }
+
+    def _maybe_save_daily_vix_snapshot(self, now: datetime, vix_ltp: float):
+        """At most once per calendar day, across every Program -- see
+        config.SIGNAL_HISTORY_DIR's comment for why this is a small
+        forward-only daily scalar log, not a historical-data pipeline."""
+        date_str = now.date().isoformat()
+        if store.load_signal_snapshot(date_str) is not None:
+            return
+        store.save_signal_snapshot(date_str, {"date": date_str, "vix_close_seen": vix_ltp})
+
+    def _maybe_log_greeks_unverifiable(self, program: dict):
+        """Logged once per Program per day (not every 15s tick) -- see
+        _greeks_unverifiable_logged's own comment in __init__ for why this
+        is in-memory only."""
+        program_id = program["config"]["program_id"]
+        today = clock.today().isoformat()
+        if self._greeks_unverifiable_logged.get(program_id) == today:
+            return
+        self._greeks_unverifiable_logged[program_id] = today
+        msg = ("Greeks/IV data did not arrive from the broker within the fetch timeout -- this account's "
+               "entitlement for that channel is unconfirmed. IV-rank-dependent entry gates are failing "
+               "open/closed per on_greeks_unverifiable until this resolves.")
+        self._log(program, msg)
+        failure_log.log_failure(category="program_greeks_unverifiable", order_id=None,
+                                 program_id=program_id, message=f"Program {program['config']['name']}: {msg}")
+
     async def _start_new_cycle(self, program: dict, now: datetime):
         cfg = program["config"]
         om = self._order_manager_for(cfg)
@@ -682,6 +786,41 @@ class ProgramManager:
             self._log(program, f"Can't start a cycle: no strike near spot {spot} has both a CE and a PE "
                                 f"listed for expiry {expiry}.")
             return
+
+        # Optional live-market precondition: does this moment actually favor entering a long straddle?
+        # Checked ONCE here, on the ATM pair specifically -- before the widening/margin loop below, since
+        # there's no reason to run that loop at all if the entry is going to be skipped anyway. See
+        # entry_signals.py for what this can gate on and why every gate defaults to allowing (OFF unless
+        # entry_signals.enabled=True, and each individual threshold is itself optional on top of that).
+        entry_cfg = cfg.get("entry_signals") or {}
+        if entry_cfg.get("enabled"):
+            atm_ce, atm_pe = atm_pair
+            ce_stream_symbol, pe_stream_symbol = f"{atm_ce.exc_token}_NFO", f"{atm_pe.exc_token}_NFO"
+            snaps = await self._fetch_entry_signal_snapshots(om, entry_cfg, index_stream_symbol,
+                                                               ce_stream_symbol, pe_stream_symbol)
+            vix_history = []
+            if entry_cfg.get("max_vix_percentile") is not None:
+                min_days = entry_cfg.get("vix_percentile_min_days", 10)
+                vix_history = [s["vix_close_seen"] for s in store.list_recent_signal_snapshots(days=min_days * 3)
+                                if s.get("vix_close_seen") is not None]
+            if snaps["vix_ltp"] is not None:
+                self._maybe_save_daily_vix_snapshot(now, snaps["vix_ltp"])
+
+            allowed, reason, greeks_unverifiable = entry_signals.evaluate_entry(
+                entry_cfg, index_snapshot=snaps["index_snapshot"], ce_snapshot=snaps["ce_snapshot"],
+                pe_snapshot=snaps["pe_snapshot"], ce_greeks=snaps["ce_greeks"], pe_greeks=snaps["pe_greeks"],
+                vix_ltp=snaps["vix_ltp"], vix_history=vix_history,
+            )
+            if greeks_unverifiable:
+                self._maybe_log_greeks_unverifiable(program)
+            if not allowed:
+                self._set_program_alert(program, f"Entry signals blocked this cycle: {reason}. This "
+                                                  f"Program will keep retrying automatically as conditions "
+                                                  f"change.")
+                self._log(program, f"Cycle start skipped -- entry signal gate: {reason}.")
+                failure_log.log_failure(category="program_entry_signal_blocked", order_id=None,
+                                         program_id=cfg["program_id"], message=f"Program {cfg['name']}: {reason}")
+                return
 
         # Determine BOTH legs' quantities -- and, for LIVE Programs, verify
         # (with a 10% safety buffer) there's enough margin for BOTH legs
@@ -755,6 +894,7 @@ class ProgramManager:
                 "stop": cfg["stop"], "target": cfg["target"], "time_exit": cfg["time_exit"],
                 "trail_check_interval_seconds": cfg.get("trail_check_interval_seconds", 0),
                 "exit_confirmation_windows": cfg.get("exit_confirmation_windows", 1),
+                "stop_breach_force_close_count": cfg.get("stop_breach_force_close_count", 0),
             }
             try:
                 order = await om.create_and_place_order_with_strategy(
@@ -771,4 +911,19 @@ class ProgramManager:
 
         program["runtime"]["active_cycle_id"] = cycle_id
         program["runtime"]["active_cycle_started_at"] = now_iso()
+        # Captured HERE, not derived later at _close_cycle time, because neither piece of this
+        # survives until then: update_program has no active-cycle guard, so cfg can be edited
+        # mid-cycle (program["config"] would no longer reflect what was actually in effect when
+        # this cycle started), and `offset` above is otherwise just a local that vanishes once this
+        # function returns. This is the only point that knows both. Loose top-level key (sibling of
+        # `alert`), not on `runtime`, for the same reason `alert` already is -- see its own comment.
+        program["active_cycle_snapshot"] = {
+            "program_config": copy.deepcopy(cfg),
+            "spot": spot,
+            "expiry": str(expiry),
+            "ce_id": ce.id, "pe_id": pe.id,
+            "ce_strike": ce.strike, "pe_strike": pe.strike,
+            "leg_qty": leg_qty,
+            "widen_offset": offset,
+        }
         store.save_program(program)

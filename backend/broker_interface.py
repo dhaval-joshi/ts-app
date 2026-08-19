@@ -18,6 +18,12 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class BrokerClient(Protocol):
+    # NOT part of this protocol's required shape -- PaperBrokerClient deliberately has no
+    # broker_id at all (paper isn't a real broker), so every call site reads this via
+    # getattr(client, "broker_id", None) rather than assuming it's always present. Listed
+    # here only as documentation of the attribute a REAL broker client is expected to carry.
+    broker_id: str
+
     async def login(self) -> None: ...
 
     @property

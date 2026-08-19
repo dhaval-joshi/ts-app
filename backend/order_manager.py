@@ -40,9 +40,9 @@ import math
 import statistics
 import time
 import uuid
-from datetime import datetime, date, time as dtime
+from datetime import time as dtime
 
-from . import config, store, failure_log
+from . import clock, config, store, failure_log, factsheet
 from .broker_interface import BrokerClient
 from .tradejini_client import TradejiniApiError
 
@@ -103,7 +103,7 @@ def _round_up_to_tick(price: float, tick_size: float) -> float:
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return clock.now_iso()
 
 
 class OrderManager:
@@ -129,6 +129,10 @@ class OrderManager:
         # any order yet, layered on top of the real per-order subscriptions
         self._adhoc_price_symbols: set[str] = set()
         self._price_fetch_waiters: dict[str, list[asyncio.Future]] = {}
+        self._greeks_fetch_waiters: dict[str, list[asyncio.Future]] = {}  # separate from the price waiters
+                                                       # above -- different payload shape (a dict, not a
+                                                       # float), and no reason to put new risk anywhere
+                                                       # near the proven price-fetch path
         self._latest_prices: dict[str, float] = {}  # stream_symbol -> most recent tick, ANY symbol that's
                                                        # ever ticked (not just tracked watching orders) --
                                                        # used by PaperBrokerClient for synchronous, non-blocking
@@ -162,6 +166,9 @@ class OrderManager:
         orders list (and therefore the whole dashboard) for every order."""
         o.setdefault("tick_size", DEFAULT_TICK_SIZE)
         o.setdefault("last_ltp", None)
+        o.setdefault("last_ltt", None)  # exchange's own last-traded-time for the most recent tick --
+                                          # diagnosis only (fresh vs. stale tick, clock drift), never
+                                          # compared for equality or used to drive any decision
         o.setdefault("pnl", {})
         o["pnl"].setdefault("unrealized", None)
         o["pnl"].setdefault("unrealized_pct", None)
@@ -180,6 +187,21 @@ class OrderManager:
         o.setdefault("program_leg", None)
         o.setdefault("trail_check_interval_seconds", 0)  # 0 = no aggregation, today's exact behavior
         o.setdefault("exit_confirmation_windows", 1)      # 1 = fire on first crossing, today's exact behavior
+        o.setdefault("stop_breach_force_close_count", 0)  # 0 = off, today's exact behavior
+        o.setdefault("stop_breach_count", 0)  # lifetime counter -- deliberately a real, persisted order
+                                                # field (like trail_update_count/trail_failure_count),
+                                                # NOT ephemeral in-memory state -- a restart must not
+                                                # silently reset "this stop has been tested N times"
+        o.setdefault("broker_id", None)  # which broker this order actually went to; None for paper
+                                           # (paper isn't a real broker) and for any order saved before
+                                           # this field existed (safe default -- reconciliation only
+                                           # ever considers owner=="live" orders in the first place)
+        o.setdefault("strategy_snapshot", {})  # the resolved strategy/leg_strategy dict exactly as it
+                                                 # stood at order-creation time -- independent of whatever
+                                                 # the named Strategy or Program config later becomes
+                                                 # (renamed, edited, deleted). Empty for orders saved
+                                                 # before this field existed -- there's no way to
+                                                 # reconstruct history that was never captured.
         return o
 
     def _load_orders_safely(self, loader) -> list[dict]:
@@ -233,13 +255,15 @@ class OrderManager:
                 symbols.add(o["stream_symbol"])
         self.stream.set_trailing_symbols(symbols, owner=self.owner)
 
-    async def fetch_live_price(self, stream_symbol: str, timeout: float = 8.0) -> float | None:
-        """One-off "what's the current price" for the New Order page's Fetch
-        Price button. Temporarily subscribes to that symbol's live ticks
-        (reusing the same subscription mechanism trailing/P&L already use),
-        waits for the next tick, then drops the temporary subscription again
-        unless a real order still needs it. Returns None on timeout (e.g.
-        market closed, bad symbol, feed not connected)."""
+    async def fetch_market_snapshot(self, stream_symbol: str, timeout: float = 8.0) -> dict | None:
+        """Temporarily subscribes to that symbol's live ticks (reusing the
+        same subscription mechanism trailing/P&L already use), waits for
+        the next tick, then drops the temporary subscription again unless
+        a real order still needs it. Returns the FULL merged tick dict
+        (ltp, OI, session open/high/low, vwap, etc. -- whatever the SDK
+        has accumulated for this symbol so far) or None on timeout (e.g.
+        market closed, bad symbol, feed not connected). fetch_live_price
+        below is a thin wrapper over this for callers that only want ltp."""
         loop = asyncio.get_event_loop()
         future = loop.create_future()
         self._price_fetch_waiters.setdefault(stream_symbol, []).append(future)
@@ -257,6 +281,36 @@ class OrderManager:
                 self._price_fetch_waiters.pop(stream_symbol, None)
                 self._adhoc_price_symbols.discard(stream_symbol)
                 self._resubscribe_live_price_symbols()
+
+    async def fetch_live_price(self, stream_symbol: str, timeout: float = 8.0) -> float | None:
+        """One-off "what's the current price" for the New Order page's Fetch
+        Price button, and every other existing ltp-only caller -- unchanged
+        behavior, now just extracting ltp from fetch_market_snapshot."""
+        snapshot = await self.fetch_market_snapshot(stream_symbol, timeout=timeout)
+        return snapshot.get("ltp") if snapshot else None
+
+    async def fetch_greeks_snapshot(self, stream_symbol: str, timeout: float = 8.0) -> dict | None:
+        """One-shot live Greeks/IV fetch for entry_signals' IV-rank gate --
+        deliberately separate from the price-waiter mechanism above (see
+        _greeks_fetch_waiters). Returns None on timeout, which IS the live
+        entitlement signal: if this account isn't provisioned for the
+        Greeks channel, this is how that's discovered, naturally, the
+        first time a Program actually tries to use it -- see
+        entry_signals.evaluate_entry's greeks_unverifiable handling."""
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._greeks_fetch_waiters.setdefault(stream_symbol, []).append(future)
+        self.stream.subscribe_greeks_snapshot({stream_symbol})
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            waiters = self._greeks_fetch_waiters.get(stream_symbol, [])
+            if future in waiters:
+                waiters.remove(future)
+            if not waiters:
+                self._greeks_fetch_waiters.pop(stream_symbol, None)
 
     # --------------------------------------------------------- public API
 
@@ -389,6 +443,7 @@ class OrderManager:
             "status": "entry_pending",
             "close_reason": None,
             "last_ltp": None,
+            "last_ltt": None,
             "pnl": {"unrealized": None, "unrealized_pct": None, "realized": None, "exit_avg_price": None, "source": None},
             "warning": None,  # {"message": str, "since": iso timestamp} when a protective order needs attention
             "trail_update_count": 0,    # successful trailing modifies, lifetime
@@ -400,9 +455,17 @@ class OrderManager:
                 # from the resolved Strategy (Regular OMS) or the Program's own leg_strategy dict, same
                 # pattern as tick_size/time_exit above -- 0 (absent for a plain Strategy dict, or an
                 # explicit 0) means no aggregation, today's exact per-tick behavior
-            "exit_confirmation_windows": strategy.get("exit_confirmation_windows", 1) or 1,  # Program-only
-                # field -- a plain Strategy dict never has this key, so Regular OMS orders always get the
-                # default of 1 (fire on first crossing, unchanged from before this feature)
+            "exit_confirmation_windows": strategy.get("exit_confirmation_windows", 1) or 1,  # on both
+                # StrategyConfig and ProgramConfig -- full parity; 1 (fire on first crossing) if the
+                # resolved strategy dict doesn't set it
+            "stop_breach_force_close_count": strategy.get("stop_breach_force_close_count", 0) or 0,
+            "stop_breach_count": 0,  # lifetime counter, starts fresh for every new order
+            "broker_id": getattr(self.client, "broker_id", None),  # None for paper (PaperBrokerClient
+                # has no broker_id at all -- it isn't a real broker); the live client's own broker_id
+                # otherwise (see TradejiniClient.broker_id)
+            "strategy_snapshot": dict(strategy),  # the resolved strategy/leg_strategy dict exactly as
+                # used for THIS order -- survives independently of whatever the named Strategy or
+                # Program config later becomes (renamed, edited, deleted)
             "logs": [],
         }
 
@@ -456,6 +519,9 @@ class OrderManager:
             self._log(order, f"Entry order REJECTED by broker: {e}")
             failure_log.log_failure(category="entry_rejected", order_id=order_id, program_id=order.get("program_id"),
                                      message=str(e), request=entry_payload, response=e.payload)
+            self._on_terminal(order)  # this order never reaches "watching" at all -- this is its
+                                        # ONLY terminal transition, so its factsheet has to be written
+                                        # here or never (the caution rule's caught gap -- see _on_terminal)
 
         store.save_order(order)
         self._resubscribe_live_price_symbols()  # harmless no-op for live (subscribe_all_active=False means
@@ -534,8 +600,7 @@ class OrderManager:
             # nothing was ever filled (entry cancelled before any fill) vs. a
             # position that genuinely got flattened -- record the right terminal state
             order["status"] = "closed" if filled else "cancelled"
-            order["warning"] = None  # terminal -- nothing left to warn about
-            self._trail_state.pop(order["order_id"], None)  # terminal -- no more evaluations coming
+            self._on_terminal(order)
             self._log(order, "Nothing left to square off; marking " + order["status"] + ".")
 
         store.save_order(order)
@@ -589,6 +654,19 @@ class OrderManager:
 
     def nudge_reconcile(self):
         self._reconcile_event.set()
+
+    def lock(self) -> asyncio.Lock:
+        """Exposes the SAME lock reconcile_loop() already uses around
+        _reconcile_once()/_check_time_exits(), for broker_reconcile.py's
+        correction-writing phase to hold too -- a small public accessor
+        rather than that module reaching into a private attribute
+        directly. The two never touch the same order (the live loop only
+        ever processes non-terminal orders; reconciliation only ever
+        processes terminal ones), but archiving an order (a separate,
+        concurrent path) touches the container dicts these iterate over,
+        so sharing the lock during a correction write is a cheap defensive
+        measure against that narrow overlap."""
+        return self._lock
 
     async def reconcile_loop(self):
         while True:
@@ -649,7 +727,7 @@ class OrderManager:
             return True
         elif bo.get("status") in ("rejected", "cancelled"):
             order["status"] = "entry_rejected" if bo.get("status") == "rejected" else "cancelled"
-            self._trail_state.pop(order["order_id"], None)  # terminal -- no more evaluations coming
+            self._on_terminal(order)
             self._log(order, f"Entry order ended: {bo.get('status')} ({bo.get('reason', '')}).")
             store.save_order(order)
             return True
@@ -674,9 +752,11 @@ class OrderManager:
             order["square_off"]["status"] = "completed"
             order["status"] = "closed"
             order["pnl"]["source"] = "broker order record (exact, square-off)"
-            order["warning"] = None  # position is closed -- nothing left to warn about
-            self._trail_state.pop(order["order_id"], None)  # terminal -- no more evaluations coming
             self._finalize_realized_pnl(order, bo.get("avgPrice"))
+            # _on_terminal (and the factsheet write inside it) runs AFTER _finalize_realized_pnl,
+            # deliberately -- the factsheet must capture the FINAL realized P&L, not whatever was
+            # there (typically still None) before this order's exit price was actually known
+            self._on_terminal(order)
             self._log(order, f"Square-off filled at {bo.get('avgPrice')} -- position closed. "
                               f"P&L: {order['pnl']['realized']}.")
             store.save_order(order)
@@ -701,7 +781,7 @@ class OrderManager:
         closing_since = order.get("closing_since")
         if closing_since:
             try:
-                elapsed = (datetime.now() - datetime.fromisoformat(closing_since)).total_seconds()
+                elapsed = (clock.now() - clock.parse_iso(closing_since)).total_seconds()
             except ValueError:
                 elapsed = 0
             if elapsed > SQUARE_OFF_STUCK_TIMEOUT_SECONDS:
@@ -746,13 +826,16 @@ class OrderManager:
         if exit_avg_price is None or entry_avg is None:
             return
         sign = 1 if order["side"] == "buy" else -1
-        realized = (exit_avg_price - entry_avg) * order["qty"] * sign
+        # entry.fill_qty (what actually filled), NOT order["qty"] (what was requested) -- on a partial
+        # fill these differ, and _do_close's own square-off already squares off fill_qty specifically
+        # (see "filled = order["entry"]["fill_qty"]"), so P&L must be computed on that same quantity
+        realized = (exit_avg_price - entry_avg) * order["entry"]["fill_qty"] * sign
         order["pnl"]["realized"] = round(realized, 2)
 
     # ----------------------------------------------------------- timers
 
     async def _check_time_exits(self):
-        now = datetime.now()
+        now = clock.now()
         for order in list(self._orders.values()):
             if order["status"] not in ("entry_pending", "position_open", "watching"):
                 continue
@@ -766,7 +849,7 @@ class OrderManager:
                     reason = f"intraday window ({te['window_start']}-{te.get('window_end','')})"
             elif te.get("mode") == "datetime" and te.get("at"):
                 try:
-                    at_dt = datetime.fromisoformat(te["at"])
+                    at_dt = clock.parse_iso(te["at"])
                     if now >= at_dt:
                         due = True
                         reason = f"scheduled close time {te['at']}"
@@ -788,6 +871,7 @@ class OrderManager:
     async def handle_l1_tick(self, data: dict):
         symbol = data.get("symbol")
         ltp = data.get("ltp")
+        ltt = data.get("ltt")  # exchange's own last-traded-time, not present on every tick spec
         if symbol is None or ltp is None:
             return
 
@@ -797,12 +881,14 @@ class OrderManager:
         if waiters:
             for future in waiters:
                 if not future.done():
-                    future.set_result(ltp)
+                    # the FULL merged tick dict (not just ltp) -- fetch_live_price extracts .get("ltp"),
+                    # fetch_market_snapshot returns it whole (OI, session O/H/L, vwap, etc.)
+                    future.set_result(dict(data))
 
         for order in self._orders.values():
             if order["status"] != "watching" or order.get("stream_symbol") != symbol:
                 continue
-            self._update_live_pnl(order, ltp)  # unconditional, every raw tick -- display accuracy is a
+            self._update_live_pnl(order, ltp, ltt)  # unconditional, every raw tick -- display accuracy is a
                                                   # separate concern from trailing/exit DECISION cadence below
 
             interval = order.get("trail_check_interval_seconds") or 0
@@ -832,6 +918,21 @@ class OrderManager:
                 if order["stop"]["trailing"]["enabled"] or order["target"]["trailing"]["enabled"]:
                     await self._maybe_trail(order, eval_price)
                 await self._maybe_app_market_exit(order, eval_price)
+
+    async def handle_greeks_tick(self, data: dict):
+        """Routed here from main.py's stream consumer for any packet whose
+        msgType is "greeks" -- resolves fetch_greeks_snapshot's waiters.
+        Deliberately doesn't touch order state or P&L at all; Greeks are
+        entry-decision input only in this round (see entry_signals.py),
+        not part of the trailing/exit engine above."""
+        symbol = data.get("symbol")
+        if symbol is None:
+            return
+        waiters = self._greeks_fetch_waiters.get(symbol)
+        if waiters:
+            for future in waiters:
+                if not future.done():
+                    future.set_result(dict(data))
 
     async def _maybe_app_market_exit(self, order: dict, ltp: float):
         """Watches live price directly -- no broker-side conditional order
@@ -868,14 +969,40 @@ class OrderManager:
         # Program that doesn't set it) -- a crossed trigger must stay crossed for this many CONSECUTIVE
         # evaluations (one evaluation = one raw tick if trail_check_interval_seconds is 0, or one
         # aggregation window close otherwise) before actually firing, instead of firing the instant a
-        # single evaluation crosses it. Guards on confirm_n > 1 so the default case never touches
-        # self._trail_state at all.
+        # single evaluation crosses it.
+        #
+        # stop_breach_force_close_count (stop side only) is the deliberate complement: a leg that keeps
+        # testing its stop and recovering before confirmation -- exactly the case exit_confirmation_windows
+        # can prolong rather than prevent -- gets counted. Once it's been tested this many times, the
+        # NEXT hit force-closes immediately regardless of confirmation state: repeated testing is itself
+        # the signal at that point, no reason to keep waiting for one more confirmed test.
+        #
+        # Both guarded behind a single "needs_state" check so the default case (confirm_n=1, breach
+        # tracking off) never touches self._trail_state at all.
         confirm_n = order.get("exit_confirmation_windows") or 1
-        if confirm_n > 1:
+        breach_limit = order.get("stop_breach_force_close_count") or 0
+        breach_fired = False
+        if confirm_n > 1 or breach_limit > 0:
             state = self._trail_state.setdefault(order["order_id"], {})
-            state["stop_confirm_streak"] = state.get("stop_confirm_streak", 0) + 1 if stop_hit else 0
+            prev_stop_streak = state.get("stop_confirm_streak", 0)
+            state["stop_confirm_streak"] = prev_stop_streak + 1 if stop_hit else 0
             state["target_confirm_streak"] = state.get("target_confirm_streak", 0) + 1 if target_hit else 0
-            stop_hit = stop_hit and state["stop_confirm_streak"] >= confirm_n
+
+            # A completed "near-miss episode": the stop was hit for at least one evaluation
+            # (prev_stop_streak > 0) and this evaluation shows it's recovered (streak reset to
+            # 0) -- without the order having actually closed in between. Persisted on the order
+            # itself (not this ephemeral state dict) so it survives a restart -- see the field's
+            # own comment in _backfill_order_fields for why an in-memory counter wouldn't do.
+            if breach_limit > 0 and prev_stop_streak > 0 and state["stop_confirm_streak"] == 0:
+                order["stop_breach_count"] = order.get("stop_breach_count", 0) + 1
+                store.save_order(order)
+                self._log(order, f"Stop tested and recovered before confirming "
+                                  f"(breach {order['stop_breach_count']}/{breach_limit}).")
+
+            stop_confirmed = state["stop_confirm_streak"] >= confirm_n
+            breach_fired = (breach_limit > 0 and stop_hit
+                             and order.get("stop_breach_count", 0) >= breach_limit)
+            stop_hit = stop_hit and (stop_confirmed or breach_fired)
             target_hit = target_hit and state["target_confirm_streak"] >= confirm_n
 
         if not (stop_hit or target_hit):
@@ -884,7 +1011,12 @@ class OrderManager:
         # capital wins over capturing extra profit
         reason = "stop" if stop_hit else "target"
         trig_value = stop_trig if stop_hit else target_trig
-        confirm_note = f" (confirmed over {confirm_n} consecutive evaluations)" if confirm_n > 1 else ""
+        if breach_fired:
+            confirm_note = f" (stop breached {breach_limit}+ times previously -- closing without waiting for confirmation)"
+        elif confirm_n > 1:
+            confirm_note = f" (confirmed over {confirm_n} consecutive evaluations)"
+        else:
+            confirm_note = ""
         self._log(order, f"Price {ltp} crossed the {reason} trigger ({trig_value}){confirm_note} -- firing a "
                           f"market order to close now.")
         order["status"] = "closing"
@@ -904,11 +1036,20 @@ class OrderManager:
         started (e.g. nothing has subscribed to it yet)."""
         return self._latest_prices.get(stream_symbol)
 
-    def _update_live_pnl(self, order: dict, ltp: float):
+    def _update_live_pnl(self, order: dict, ltp: float, ltt: str | None = None):
         """Updates in-memory only (not written to disk on every tick -- the
         2s dashboard websocket push already picks this up from memory, and
-        writing a JSON file on every price tick would be needless I/O)."""
+        writing a JSON file on every price tick would be needless I/O).
+
+        `ltt` is the EXCHANGE's own last-traded-time for this tick (decoded
+        by nxtradstream.py, always IST regardless of host timezone) -- kept
+        purely for diagnosis (is this tick actually fresh, or a stale
+        repeat? did our clock drift from the exchange's?), never compared
+        for equality or used to drive any decision, same rule
+        broker_reconcile.py already follows for broker timestamps."""
         order["last_ltp"] = ltp
+        if ltt is not None:
+            order["last_ltt"] = ltt
         entry_avg = order["entry"]["avg_price"]
         if entry_avg is None:
             return
@@ -989,6 +1130,26 @@ class OrderManager:
         if order.get("warning") is not None:
             order["warning"] = None
             store.save_order(order)
+
+    def _on_terminal(self, order: dict):
+        """The single place every terminal-status transition converges on
+        -- called from all FOUR sites an order can reach closed/cancelled/
+        entry_rejected (TERMINAL_STATUSES): the place-time rejection
+        branch in create_and_place_order_with_strategy, _do_close's
+        immediate-terminal branch, _reconcile_entry's rejected/cancelled
+        branch, and _reconcile_square_off's completed branch. Previously
+        each of the latter three duplicated `_trail_state.pop(...)`
+        inline and the place-time-rejection branch didn't clean it up at
+        all -- a real gap, since a leg rejected at placement never
+        reaches "watching" but could still theoretically have had
+        adhoc/trailing state if this ever changes. Also writes this
+        order's factsheet -- the durable, outside-the-live-record
+        snapshot -- exactly once, here, since this is the one place that
+        reliably fires for every terminal order regardless of which of
+        the four paths got it there."""
+        self._trail_state.pop(order["order_id"], None)
+        order["warning"] = None
+        factsheet.write_order_factsheet(order)  # never raises -- see that function's own docstring
 
 
 
