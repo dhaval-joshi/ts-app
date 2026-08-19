@@ -1,0 +1,17 @@
+# Project-local Codex command rules.
+# Rules apply to commands that Codex wants to run outside the sandbox.
+# They are an additional guardrail, not a replacement for the sandbox or
+# the repository's AGENTS.md secret policy.
+
+# Never allow common direct secret-dumping commands outside the sandbox.
+prefix_rule(
+    pattern = ["cat", ".env"],
+    decision = "forbidden",
+    justification = "Never expose the project's local .env secrets."
+)
+
+prefix_rule(
+    pattern = ["type", ".env"],
+    decision = "forbidden",
+    justification = "Never expose the project's local .env secrets."
+)

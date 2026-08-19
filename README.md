@@ -1826,3 +1826,32 @@ longer actually depends on it.
    the volume, e.g. via periodic `docker run --rm -v trading_data:/data ...`
    tar to off-VM storage).
 7. Calendar reminder before day ~90 to re-decide the provider (see above).
+
+
+## Multi-agent development (Claude Code + Codex)
+
+This repository is intentionally shared by two development agents: Claude Code
+and OpenAI Codex. Neither agent configuration file is the authoritative source
+of project behavior.
+
+- `CLAUDE.md` — Claude Code-specific instructions.
+- `AGENTS.md` — Codex/generic coding-agent instructions.
+- `docs/` — shared engineering knowledge.
+- `agent-actions/` — durable planning and code-change handovers.
+- Git status/diff/history — shared implementation state.
+
+When switching agents, the incoming agent must inspect the working tree and the
+`agent-actions/` folders before changing anything. Do not discard another
+agent's uncommitted work.
+
+For every non-trivial coding task, the active agent creates a plan under
+`agent-actions/planned/` using `plan_<epoch>_<short-slug>.md`, gets human
+confirmation, implements only after approval, and then creates a handover under
+`agent-actions/coded/` using `code_<epoch>_<short-slug>.md`. The human moves
+accepted artifacts to `agent-actions/done/`.
+
+`.env` and other secret-bearing files are never agent-readable by instruction.
+The actual access boundary must additionally be enforced by the local agent
+sandbox/permissions; `.gitignore` alone is not sufficient.
+
+See `docs/INDEX.md` for the shared project knowledge map.

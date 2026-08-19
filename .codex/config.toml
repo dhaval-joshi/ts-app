@@ -1,0 +1,13 @@
+# Project-local Codex defaults.
+# This file is intentionally conservative for a live-trading codebase.
+# Codex loads project .codex layers only when the project is trusted.
+
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "user"
+web_search = "cached"
+
+# Do not pass common secret-bearing environment variables to spawned commands
+# unless the user explicitly changes the policy for a specific task.
+[shell_environment_policy]
+ignore_default_excludes = false

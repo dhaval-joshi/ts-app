@@ -1,153 +1,166 @@
-# AGENTS.md — status ledger
+# AGENTS.md — Codex / Shared Coding-Agent Instructions
 
-Read by any coding agent working on this repo (Claude Code reads this via
-the `@AGENTS.md` import at the top of `CLAUDE.md`; other tools — Cursor,
-Aider, etc. — read it directly). Keep this current as work happens: update
-"Recently fixed" and "Known open items" as part of the change that touches
-them, not as a separate cleanup pass later.
+This repository is actively developed by **both Claude Code and Codex**.
+`AGENTS.md` is the Codex/generic coding-agent operating contract. It is **not**
+the sole source of project knowledge.
 
-## What this project is
+## Read before working
 
-Tradejini Trading Station — a self-hosted live trading app for NSE F&O.
-Regular OMS: manual single orders. Advanced OMS: automated "Program"
-strategies (Index ATM straddles) with safeguards, scheduling, and
-Paper/Live modes. Built almost entirely through an extended conversation
-with Claude in claude.ai chat, now moving to Claude Code for continued
-work. This file (plus CLAUDE.md and the README) is the handoff.
+Start with:
 
-## Foundational history worth knowing before you touch anything
+1. `README.md`
+2. `docs/INDEX.md`
+3. `docs/SAFETY.md`
+4. `docs/ARCHITECTURE.md`
+5. `docs/TESTING.md`
+6. `docs/DEVELOPMENT.md`
+7. `docs/DECISIONS.md` when the task touches established design decisions
+8. relevant files under `agent-actions/`
 
-- **OCO (broker-side conditional orders) was the original exit
-  mechanism and was fully retired.** Tradejini's own OCO/conditional-
-  order engine was observed, in real trading, to silently fail to
-  trigger — at real financial cost. The app now watches live price
-  itself and fires a plain market order the instant a trigger crosses.
-  This was a multi-round fix: first a config *choice* between "broker"
-  and "app_market" mechanisms, then (after a real bug where Programs
-  silently used the old mechanism regardless of config) the choice was
-  removed entirely and app-watched became the only mechanism. Then, in
-  a later round, all the *legacy code* for the broker mechanism was
-  deleted outright (not just deprecated) once the person confirmed no
-  live positions depended on it. **Do not reintroduce any broker-side
-  conditional order placement.** The README's "Historical: why OCO was
-  retired" section has the full story if you need it.
-- **A duplicate-orders bug** existed because both the live and paper
-  `OrderManager` instances loaded every order file indiscriminately with
-  no ownership filter. Fixed by tagging each order with an explicit
-  `owner` field ("live"/"paper") at creation time. If you ever see an
-  order duplicated in a list, check this first.
-- **An orphaned-position bug**: a square-off (close) order that got
-  rejected, or that got accepted but never resolved to any terminal
-  state (most likely: fired at/after market close), used to leave the
-  position stuck forever with no warning. Fixed with a timeout-based
-  recovery (`SQUARE_OFF_STUCK_TIMEOUT_SECONDS` in `order_manager.py`)
-  that reverts to a watched state and retries automatically. If you're
-  investigating "why did this position stay in `closing` forever,"
-  check this mechanism is still intact.
-- **The `oco_placed` status name was renamed to `watching`** — it was
-  actively misleading once OCO was retired (implied a broker order was
-  involved when none ever is). If you see `oco_placed` anywhere, it's
-  either dead/stale text that should be fixed, or a mistake.
-- **A live-refresh gap**: Advanced OMS Program cards used to have *zero*
-  live-refresh mechanism — they only updated on navigation or an
-  explicit action. Fixed by wiring them into the same shared websocket
-  push Regular OMS already used (`onOrdersUpdate()` in `app.js`), plus a
-  20s periodic safety net for state that isn't in that push.
-- **No timezone handling existed anywhere in the backend** — every
-  timestamp was a naive `datetime.now()`/`date.today()`, silently correct
-  only because the dev machine happens to sit in IST. Fixed with a new
-  `backend/clock.py` (hardcodes `Asia/Kolkata`, independent of host
-  timezone) that every module now goes through for "now" and for parsing
-  stored timestamps. `clock.parse_iso()` treats a naive stored string as
-  IST — every timestamp ever written before this fix genuinely was IST
-  wall-clock time, so this is backward-compatible, not a data migration.
-  If you see a bare `datetime.now()`/`date.today()`/`datetime.fromisoformat()`
-  anywhere in `backend/`, it's a bug — route it through `clock.*` instead.
-  The L1 tick's exchange-side last-traded-time (`ltt`) is now also
-  captured as `order["last_ltt"]` (diagnosis only — never compared for
-  equality or used to drive a decision).
-- **Advanced OMS entry decisions used to be completely blind to market
-  conditions** — fetch spot, ATM strike, buy CE+PE, on a fixed schedule,
-  every time, regardless of whether volatility was cheap or already
-  expensive. Fixed with `backend/entry_signals.py` (pure gate logic,
-  mirrors `program_schedule.py`/`program_safeguards.py`) checked once in
-  `_start_new_cycle`, entirely optional (`ProgramConfig.entry_signals.
-  enabled`, default `False`). Also: `OrderManager.fetch_live_price` was
-  refactored to share its subscribe-and-wait logic with a new
-  `fetch_market_snapshot` (full tick dict, not just `ltp`) — behavior for
-  every existing caller is unchanged, confirmed by a real regression test
-  before this shipped. Live Greeks/IV go through a fully separate new
-  mechanism (`fetch_greeks_snapshot`), deliberately not touching the
-  proven price-fetch path. See the README's "Entry Signal Gates -- BUILT"
-  section for the full design and what's deliberately still deferred
-  (delta-targeted strikes, theta-aware exits — both would mean editing
-  the widening loop or the exit engine directly).
-- **Whether this account is actually entitled to the broker's Greeks/IV
-  channel is unverified** — nothing in this repo proves it, and it can
-  only be confirmed live. The code fails safely either way
-  (`fetch_greeks_snapshot` returns `None` on timeout;
-  `on_greeks_unverifiable` controls whether that skips or allows the
-  cycle), but don't claim confidence about entitlement that hasn't
-  actually been observed working against a real market.
-- **A real multi-day squeeze detector (Bollinger Band Width) and a
-  mark-to-market safeguard cap were added**, both to `entry_signals.py`/
-  `program_safeguards.py` respectively, in the very next round after
-  Entry Signal Gates shipped — see the README's "Squeeze detector" and
-  "Mark-to-market cap" BUILT sections. Two things worth knowing if you
-  touch either: `data/signal_history/<date>.json` now stores
-  `index_closes` keyed by `index_id` (not just VIX) via a
-  read-modify-write helper (`_maybe_update_daily_signal_snapshot`,
-  replaced the old write-once version) — don't add a new caller that
-  writes this file directly. And the mark-to-market cap is opt-in per
-  Program (`SafeguardsConfig.mtm_aware`, default `False`) and halts only
-  — it deliberately never auto-flattens the open cycle it detected the
-  breach on; that was an explicit scope decision, not an oversight, and
-  reintroducing auto-flatten-on-halt needs the same deliberate
-  human sign-off this decision got, not a quiet addition.
+Then inspect the actual current source code. Never rely on chat history or
+memory when the current code can answer the question.
 
-## Known open items / deliberately deferred
+## This is live trading software
 
-- **`exit_mode`'s internal value `"oco"`** (meaning "watch both legs",
-  a different concept from the retired exit *mechanism*) was renamed to
-  `"both"` in the same round the legacy OCO code was deleted — already
-  done, not open. Listed here only so a future search for "oco" isn't
-  surprised to find zero live references outside the historical README
-  section and a couple of explanatory comments.
-- **No formal automated test suite exists yet.** Verification has always
-  been done via throwaway simulation scripts (write a fake `BrokerClient`,
-  run a real scenario through `OrderManager`, assert, delete the script).
-  This worked well for a chat-based sandbox with no persistent files, but
-  now that this project has real file access via Claude Code, it's worth
-  proposing a real `tests/` directory with these scenarios kept
-  permanently rather than rewritten each time. Ask the person before
-  doing this — it's a real structural change, not a small one.
-- **Phase 3/4 roadmap** — three items are already designed (not built) in
-  the README's Section 9: timeframe-aggregated trailing (reduce tick-level
-  noise), broker reconciliation (sync this app's own records against the
-  broker's authoritative history), and decoupling Programs from
-  Index-only trading. Read that section before starting any of these —
-  it has real design constraints already worked out, including specific
-  things to avoid.
-- **Market vs. Limit order for the close**, configurable per Program, is
-  also designed in the README (tied to the timeframe-trailing item) but
-  not built.
-- **Cloud migration is not scheduled** — this remains a locally-run app.
-  A product review (five features to build, five to refuse) and a
-  migration-readiness plan exist as reference for whenever the move
-  happens; ask the person for the artifact link if you need it. The one
-  piece of that round that WAS built now, ahead of any move, is proper
-  timezone handling (see above) — it was a latent correctness bug, not
-  really a migration task, so it didn't make sense to wait on.
+A bug can cause real financial loss.
 
-## Working style established across this whole build
+Non-negotiable rules:
 
-- Every fix was verified with a real, runnable simulation before being
-  called done — not just reasoned about. Keep doing this.
-- When something is genuinely uncertain (can only be confirmed against a
-  live market/broker), that uncertainty was stated plainly rather than
-  papered over with false confidence. Keep doing this too.
-- Renames and removals were swept exhaustively — backend, frontend, AND
-  the README — with a final grep sweep to confirm zero stragglers before
-  calling anything finished.
-- The person prefers direct, honest engineering communication over
-  reassurance. Report exactly what was tested and what wasn't.
+- Never intentionally read, print, copy, expose, commit, or modify `.env`,
+  `.env.*` (except `.env.example`), `secrets/`, private keys/certificates,
+  credential files, or other secret-bearing local artifacts.
+- Never dump environment variables as part of diagnosis.
+- Never place, modify, cancel, or close a real broker order as ordinary
+  verification. Live-broker actions require explicit human authorization in
+  the current task.
+- Prefer Paper mode, fake brokers, simulations, compilation, static checks,
+  and other non-live verification.
+- Never silently switch Live/Paper behavior.
+- Never silently increase quantity, exposure, or trading scope.
+- Never bypass, weaken, or remove safety checks merely to make a test pass.
+- Never reintroduce broker-side OCO/conditional exits. The application-watched
+  market-exit mechanism is the current design.
+- Never introduce automatic flattening on a safeguard halt without explicit
+  human approval.
+- Preserve atomic persistence and recovery behavior.
+
+The repository instructions are behavioral safeguards, not a substitute for
+OS-level access control. The project includes conservative Codex sandbox and
+approval defaults in `.codex/config.toml`, but `.env` must still remain outside
+any execution/workspace boundary you do not trust. Never intentionally inspect it.
+
+## Shared project truth
+
+Do not duplicate project-specific truth in `AGENTS.md` when it belongs in
+`README.md` or `docs/`.
+
+- `README.md` — detailed current product behavior and architecture.
+- `docs/` — focused shared engineering knowledge.
+- `CLAUDE.md` — Claude Code-specific workflow.
+- `.claude/` — Claude-only commands/rules/skills/settings.
+- `.codex/` — Codex project configuration and command rules.
+- `.agents/skills/` — repository-scoped portable skills discovered by current Codex.
+- `agent-actions/` — durable planning and implementation handovers.
+
+## Multi-agent workflow
+
+Claude Code and Codex share the same repository and may leave uncommitted work
+for each other.
+
+Before changing anything:
+
+```text
+git status
+git diff
+git log -5 --oneline
+```
+
+Never reset, stash, checkout, overwrite, or discard another agent's uncommitted
+changes without explicit human authorization.
+
+Inspect `agent-actions/planned/` and `agent-actions/coded/` before starting.
+If a matching artifact already exists, continue it rather than creating a
+duplicate.
+
+## Mandatory planning handover
+
+For every non-trivial task that may change code, the agent must create a
+planning artifact **without being asked**.
+
+Location:
+
+```text
+agent-actions/planned/
+```
+
+Filename:
+
+```text
+plan_<epoch>_<short-slug>.md
+```
+
+The plan must include:
+
+- objective/problem;
+- verified current behavior;
+- proposed design;
+- files/components likely affected;
+- safety implications;
+- alternatives/trade-offs where relevant;
+- verification plan;
+- open questions/assumptions;
+- explicit scope and non-scope.
+
+A plan in `planned/` is an **action item, not approval**. Present it to the
+human and obtain confirmation before implementation. If it remains in
+`planned/`, do not assume permission to code it.
+
+## Mandatory code-change handover
+
+After implementing code changes, the agent must create a code-change artifact
+**without being asked**.
+
+Location:
+
+```text
+agent-actions/coded/
+```
+
+Filename:
+
+```text
+code_<epoch>_<short-slug>.md
+```
+
+The code-change artifact must include:
+
+- associated `plan_...` filename;
+- objective;
+- files changed;
+- behavior changed;
+- important implementation decisions;
+- tests/simulations actually run and their results;
+- what was not verified;
+- known risks/follow-ups;
+- whether another agent can safely continue.
+
+The agent must **not** move anything into `agent-actions/done/`. The human owns
+acceptance and moves approved artifacts to `done/`.
+
+## Development standards
+
+- Inspect before modifying.
+- Prefer the smallest coherent change.
+- Read `backend/models.py` before changing persisted/config schemas.
+- Route backend time through `backend/clock.py`.
+- Preserve broker abstraction; do not duplicate Live/Paper order-management paths.
+- For renames/removals, sweep backend, frontend, documentation, and relevant
+  configuration for stale references.
+- Comments should explain why, especially around safety-critical behavior.
+- Report exactly what was tested and what remains uncertain.
+- Distinguish verified, inferred, and live-unverified behavior.
+
+## Handover quality
+
+Another agent must be able to continue from the repository alone. Do not rely
+on "I explained this in the chat" for important decisions.

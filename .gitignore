@@ -5,3 +5,11 @@ __pycache__/
 data/*
 CLAUDE.local.md
 .claude/settings.local.json
+AGENTS.override.md
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
