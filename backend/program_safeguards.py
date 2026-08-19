@@ -221,3 +221,20 @@ def apply_portfolio_halt_if_needed(
         programs_runtime, set(programs_runtime.keys()),
         group_daily_pnl=portfolio_daily_pnl, group_cap=portfolio_cap, halt_status=HALTED_PORTFOLIO,
     )
+
+
+def mtm_cycle_pnl(legs: list[dict]) -> float:
+    """'What this cycle is worth right now' if you closed it this instant
+    -- realized P&L for any leg that's already closed, live unrealized
+    for any leg still open. Lets a safeguard check be mark-to-market-aware
+    instead of blind to an open cycle's bleed until it closes on its own
+    (see program_manager.py's mtm_pnl_map in tick() and the in-cycle halt
+    check in _tick_one -- both opt-in per Program via
+    SafeguardsConfig.mtm_aware, off by default)."""
+    total = 0.0
+    for order in legs:
+        p = order.get("pnl") or {}
+        val = p.get("realized") if p.get("realized") is not None else p.get("unrealized")
+        if val is not None:
+            total += val
+    return total

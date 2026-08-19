@@ -1208,9 +1208,10 @@ data/
                           immutable-snapshot-plus-amendments shape as orders above
   reconcile_reports/          one JSON file per broker_reconcile.py run (dry or
                           applied) -- the full per-order finding list, not just a summary
-  signal_history/             one small JSON file per trading day (currently just
-                          the day's India VIX close seen) -- entry_signals.py's
-                          VIX-percentile gate builds real history from this over a
+  signal_history/             one small JSON file per trading day -- the day's India
+                          VIX close seen, plus each traded index's own price seen
+                          (keyed by index_id) -- entry_signals.py's VIX-percentile
+                          and squeeze (Bollinger Band Width) gates build real history from this over a
                           few weeks; NOT a historical-data pipeline, see above
   script_master/             cached index/option data from Tradejini's live feed,
                           refetched automatically when their version changes
@@ -1561,10 +1562,76 @@ a Program that doesn't opt in.
   -- both safety-critical, both already carrying a lot of recently-added
   logic. This round is gates only: whether/when a cycle starts, never
   which strikes get chosen or when an open cycle exits. Also not built:
-  L5 depth/order-book imbalance and streaming OHLC candles (both
-  decodable per this round's research, no concrete use case identified
-  yet for this strategy); Regular OMS support (Advanced OMS Programs
-  only, for now).
+  L5 depth/order-book imbalance and streaming OHLC candles (still no
+  concrete use case identified for this strategy) -- see the squeeze
+  detector below for why a real multi-day squeeze signal didn't end up
+  needing either of those anyway. Regular OMS support (Advanced OMS
+  Programs only, for now).
+
+### Squeeze detector (Bollinger Band Width) -- BUILT
+
+A sixth entry gate, added in the same round as the mark-to-market cap
+below once delta/theta refinements were judged low-priority for an
+account that needs to demonstrate results before optimizing basis points.
+Replaces `session_range_gate`'s same-session approximation ("hasn't moved
+much *today*") with the actual textbook long-volatility timing signal:
+has price been compressed *over days* relative to its own recent history.
+
+The original deferral above assumed this needed genuinely new persistence
+(streaming OHLC candles). On closer look it didn't -- Bollinger Band Width
+needs only a **daily closing price**, and `data/signal_history/<date>.json`
+(built for the VIX-percentile gate) already existed. Extended to
+`{"date": ..., "vix_close_seen": ..., "index_closes": {"<index_id>": price}}`
+-- keyed by index so multiple underlyings share one file per day, same as
+VIX. `entry_signals.squeeze_gate` (pure, mirrors `vix_percentile_gate`'s
+shape exactly): computes today's Bollinger Band Width off the last
+`squeeze_bollinger_period` days (default 20), ranks it against every
+PRIOR day's own reading over `squeeze_min_days` more days (default 10) --
+allows unless today's reading is unusually *wide* (not compressed)
+relative to that history. Needs roughly `period + min_days` trading days
+(~6 weeks at defaults) before it activates, same "degrades to allow,
+logged as such, until enough history exists" rule as VIX-percentile.
+Captured value is "first price observed the day the gate first ran," not
+a true end-of-day close -- same approximation `vix_close_seen` already
+makes, acceptable because this is a rolling signal over weeks where
+day-to-day capture-moment noise washes out.
+
+### Mark-to-market cap -- BUILT
+
+Confirmed, not assumed: `_tick_one` skipped every safeguard check
+entirely while a cycle was active (`program_manager.py`'s active-cycle
+branch just checked whether both legs were terminal, then returned) -- an
+open cycle bleeding unrealized loss was invisible to its own Program's
+daily cap, its Risk Group's cap, and the portfolio cap, until it closed
+on its own.
+
+- **Opt-in per Program** -- `SafeguardsConfig.mtm_aware`, default `False`.
+  A Program that turns it on has `daily_realized_pnl` PLUS its currently-
+  open cycle's live P&L (`program_safeguards.mtm_cycle_pnl`: realized for
+  any leg already closed, live unrealized for any leg still open) checked
+  against its own `daily_loss_amount` on **every tick**, not just at
+  cycle-close -- and also contributes that live number to its Risk
+  Group's and the portfolio's aggregate. A Program that hasn't opted in
+  stays invisible in MTM terms at every tier, exactly like before this
+  round.
+- **`program_safeguards.py` itself needed almost no change** --
+  `apply_group_halt_if_needed`/`apply_portfolio_halt_if_needed` already
+  just take a P&L float; `program_manager.tick()` simply computes a
+  richer number (`mtm_pnl_map`) to pass in. The one genuinely new check
+  is inside `_tick_one`'s active-cycle branch, evaluating the Program's
+  *own* cap while a cycle is still open -- something no code path did at
+  all before this.
+- **Halt only, never auto-flatten.** Matches the existing, deliberate
+  invariant that a hard stop never touches currently-open legs -- this
+  cap stops the *next* cycle from starting; the open one keeps running
+  its own SL/target/trailing exactly as configured. Reuses the existing
+  `HALTED_DAILY_LOSS` status (a timing difference in *when* the same cap
+  was detected, not a different kind of stop) so no new status/label was
+  needed anywhere in the UI.
+- **Live MTM total shown on the Program card** (only when `mtm_aware` is
+  on and a cycle is active) -- a transient, non-persisted-every-tick
+  value (`program["mtm_pnl"]`, same precedent as `order["last_ltp"]`),
+  refreshed by the existing periodic runtime poll.
 
 ### Programs decoupled from Index -- any tradeable instrument, not just an Index
 

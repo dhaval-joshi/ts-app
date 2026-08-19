@@ -229,6 +229,11 @@ function programCardHtml(program, allOrders, opts = {}) {
       <div><div class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Today's P&amp;L</div><div class="text-sm font-medium ${pnlColorClass(rt.daily_realized_pnl)}">${signed(rt.daily_realized_pnl)}</div></div>
       <div><div class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Daily loss cap</div><div class="text-sm font-medium text-slate-900">₹${fmt(cfg.safeguards.daily_loss_amount)}</div></div>
     </div>
+    ${cfg.safeguards.mtm_aware && program.mtm_pnl != null ? `
+    <div class="mt-2 text-xs text-slate-500">
+      Including this open cycle's live P&amp;L: <span class="font-medium ${pnlColorClass(rt.daily_realized_pnl + program.mtm_pnl)}">${signed(rt.daily_realized_pnl + program.mtm_pnl)}</span>
+      <span class="text-slate-300">(mark-to-market aware -- this Program halts if this crosses the daily loss cap, even before the cycle closes)</span>
+    </div>` : ""}
 
     ${activeLegsHtml}
 
@@ -408,11 +413,13 @@ function programFormHtml(p) {
     stop: { offset_mode: "percent", trig_offset: 20, limit_offset: 0, trailing: { enabled: true, trail_by: 5, activation_offset: 0 } },
     target: { offset_mode: "percent", trig_offset: 40, limit_offset: 0, trailing: { enabled: true, trail_by: 10, activation_offset: 0 } },
     time_exit: { mode: "intraday_window", window_start: "15:10", window_end: "15:15", at: null },
-    safeguards: { consecutive_loss_limit: 3, daily_loss_amount: 5000, max_cycles_per_day: 5, cooldown_minutes: 5 },
+    safeguards: { consecutive_loss_limit: 3, daily_loss_amount: 5000, max_cycles_per_day: 5, cooldown_minutes: 5, mtm_aware: false },
     schedule: { continuous: false, start_time: "09:15", end_time: "14:55", days: "all", inter_cycle_delay_seconds: 0 },
     trail_check_interval_seconds: 0, exit_confirmation_windows: 1, stop_breach_force_close_count: 0,
     entry_signals: { enabled: false, max_vix: null, max_oi_chng_pct: null, max_session_range_pct: null,
-      max_vix_percentile: null, vix_percentile_min_days: 10, max_iv_session_rank_pct: null, on_greeks_unverifiable: "allow" },
+      max_vix_percentile: null, vix_percentile_min_days: 10, max_iv_session_rank_pct: null,
+      max_squeeze_bandwidth_percentile: null, squeeze_bollinger_period: 20, squeeze_bollinger_std: 2.0,
+      squeeze_min_days: 10, on_greeks_unverifiable: "allow" },
   };
   const indexOptions = indicesCache.map((i) => `<option value="${i.index_id}" ${i.index_id === cfg.index_id ? "selected" : ""}>${i.disp_name}</option>`).join("");
   const riskGroupOptions = allRiskGroups.map((g) => `<option value="${g.risk_group_id}" ${g.risk_group_id === cfg.risk_group_id ? "selected" : ""}>${g.name}</option>`).join("");
@@ -541,6 +548,11 @@ function programFormHtml(p) {
         <div><label class="field-label">Cooldown (minutes)</label><input name="cooldown_minutes" type="number" min="0" step="1" value="${cfg.safeguards.cooldown_minutes}" class="field-input" /></div>
       </div>
       <p class="text-xs text-slate-400 mt-2">Once past max cycles/day, every subsequent cycle that day waits the cooldown before starting (a standing slow-down, not a one-time pause). Consecutive-loss and daily-loss caps are hard stops -- they need a manual Resume.</p>
+      <label class="flex items-center gap-2 text-sm mt-3 text-slate-700">
+        <input type="checkbox" name="mtm_aware" ${cfg.safeguards.mtm_aware ? "checked" : ""} class="w-4 h-4" />
+        Mark-to-market aware
+      </label>
+      <p class="text-xs text-slate-400 mt-1">Include this Program's currently-OPEN cycle's live unrealized P&amp;L in the daily loss cap above (and in its Risk Group's / the portfolio's aggregate), not just realized P&amp;L at cycle-close. Off by default -- an open cycle bleeding loss is otherwise invisible to every cap until it closes on its own. Halts only; never auto-closes the open cycle -- its own SL/target/trailing keep running untouched.</p>
     </fieldset>
 
     <fieldset class="border border-slate-200 rounded-xl p-4">
@@ -587,6 +599,11 @@ function programFormHtml(p) {
           <div><label class="field-label">VIX percentile: minimum days of history</label><input name="entry_signals_vix_percentile_min_days" type="number" min="1" step="1" value="${cfg.entry_signals.vix_percentile_min_days ?? 10}" class="field-input" /></div>
           <div><label class="field-label">Max IV session rank (%)</label><input name="entry_signals_max_iv_session_rank_pct" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_iv_session_rank_pct ?? ""}" placeholder="e.g. 30 -- blank = off" class="field-input" />
             <p class="text-[11px] text-slate-400 mt-1">Skip unless a leg's live IV ranks below this % of TODAY's own IV range -- needs live Greeks from the broker; entitlement for that channel isn't guaranteed (see the option below).</p></div>
+          <div><label class="field-label">Max squeeze bandwidth percentile</label><input name="entry_signals_max_squeeze_bandwidth_percentile" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_squeeze_bandwidth_percentile ?? ""}" placeholder="e.g. 30 -- blank = off" class="field-input" />
+            <p class="text-[11px] text-slate-400 mt-1">Skip unless the underlying's Bollinger Band Width ranks below this percentile of its own recent sessions -- the real multi-day squeeze signal (price compressed over DAYS, not just today). Builds up automatically from the same daily history as the VIX percentile gate; needs ~(period + min days) trading days before it applies -- roughly 6 weeks at the defaults below.</p></div>
+          <div><label class="field-label">Squeeze: Bollinger period (days)</label><input name="entry_signals_squeeze_bollinger_period" type="number" min="2" step="1" value="${cfg.entry_signals.squeeze_bollinger_period ?? 20}" class="field-input" /></div>
+          <div><label class="field-label">Squeeze: Bollinger std deviations</label><input name="entry_signals_squeeze_bollinger_std" type="number" min="0.1" step="any" value="${cfg.entry_signals.squeeze_bollinger_std ?? 2.0}" class="field-input" /></div>
+          <div><label class="field-label">Squeeze: minimum days of history</label><input name="entry_signals_squeeze_min_days" type="number" min="1" step="1" value="${cfg.entry_signals.squeeze_min_days ?? 10}" class="field-input" /></div>
         </div>
         <div class="mt-3">
           <label class="field-label">If Greeks/IV never arrive (entitlement unconfirmed)</label>
@@ -695,6 +712,7 @@ async function submitProgramForm() {
       daily_loss_amount: num(fd.get("daily_loss_amount")) || 5000,
       max_cycles_per_day: num(fd.get("max_cycles_per_day")) || 5,
       cooldown_minutes: num(fd.get("cooldown_minutes")) ?? 5,
+      mtm_aware: fd.get("mtm_aware") === "on",
     },
     schedule: {
       continuous: fd.get("schedule_continuous") === "on",
@@ -714,6 +732,10 @@ async function submitProgramForm() {
       max_vix_percentile: num(fd.get("entry_signals_max_vix_percentile")),
       vix_percentile_min_days: num(fd.get("entry_signals_vix_percentile_min_days")) || 10,
       max_iv_session_rank_pct: num(fd.get("entry_signals_max_iv_session_rank_pct")),
+      max_squeeze_bandwidth_percentile: num(fd.get("entry_signals_max_squeeze_bandwidth_percentile")),
+      squeeze_bollinger_period: num(fd.get("entry_signals_squeeze_bollinger_period")) || 20,
+      squeeze_bollinger_std: num(fd.get("entry_signals_squeeze_bollinger_std")) || 2.0,
+      squeeze_min_days: num(fd.get("entry_signals_squeeze_min_days")) || 10,
       on_greeks_unverifiable: fd.get("entry_signals_on_greeks_unverifiable") || "allow",
     },
   };

@@ -97,6 +97,61 @@ def vix_percentile_gate(vix_ltp: float | None, history: list[float], min_days: i
     return True, None
 
 
+def _bollinger_bandwidth(closes: list[float], period: int, num_std: float) -> float | None:
+    """Bollinger Band Width, as a percent of the mean -- the textbook
+    "squeeze" metric: a NARROW band means price has been unusually
+    compressed relative to its own recent behavior. Uses the LAST
+    `period` values in `closes` (chronological, oldest first). Returns
+    None if there aren't yet `period` closes to compute a real reading
+    from -- squeeze_gate below treats that as "can't evaluate yet"."""
+    if len(closes) < period:
+        return None
+    window = closes[-period:]
+    mean = sum(window) / period
+    if mean == 0:
+        return None
+    variance = sum((c - mean) ** 2 for c in window) / period
+    std = variance ** 0.5
+    return (2 * num_std * std) / mean * 100
+
+
+def squeeze_gate(closes: list[float], period: int, num_std: float, min_days: int,
+                  max_bandwidth_percentile: float | None) -> tuple[bool, str | None]:
+    """Skip unless price has been genuinely compressed over the last
+    `period` days relative to ITS OWN recent history of that same
+    compression measure -- the actual multi-day squeeze signal
+    session_range_gate only approximates with a single day. `closes` is
+    this Program's underlying's daily price history (chronological,
+    oldest first, ending with today's) -- see
+    program_manager._index_close_history and the daily signal-history
+    file this reads from (config.SIGNAL_HISTORY_DIR).
+
+    Needs roughly `period + min_days` days of accumulated closes before
+    it can rank today's reading against anything -- degrades to ALLOW,
+    logged as such by the caller, until then. Same "a gate that can't
+    evaluate itself must never be the reason trading silently stops"
+    rule as every other gate in this module."""
+    if max_bandwidth_percentile is None:
+        return True, None
+    current_bw = _bollinger_bandwidth(closes, period, num_std)
+    if current_bw is None:
+        return True, None  # not enough closes yet to compute a Bollinger Bandwidth reading at all
+    # every PRIOR day's own bandwidth reading, each computed using only the data that would have
+    # been available AS OF that day -- a real historical distribution to rank today's reading against,
+    # not today's reading compared to itself
+    history = [bw for i in range(period, len(closes))
+               if (bw := _bollinger_bandwidth(closes[:i], period, num_std)) is not None]
+    if len(history) < max(min_days, 1):
+        return True, None
+    below_or_equal = sum(1 for b in history if b <= current_bw)
+    percentile = below_or_equal / len(history) * 100
+    if percentile > max_bandwidth_percentile:
+        return False, (f"Bollinger Band Width {current_bw:.2f}% ranks at the {percentile:.0f}th percentile of "
+                        f"its own last {len(history)} sessions -- above the configured {max_bandwidth_percentile:.0f}th "
+                        f"ceiling (not currently compressed enough for a squeeze entry)")
+    return True, None
+
+
 def iv_session_rank_gate(leg_iv: float | None, leg_lowiv: float | None, leg_highiv: float | None,
                           max_rank_pct: float | None) -> tuple[bool, str | None]:
     """Skip unless the live option's IV sits in the lower portion of
@@ -123,7 +178,7 @@ def iv_session_rank_gate(leg_iv: float | None, leg_lowiv: float | None, leg_high
 
 def evaluate_entry(cfg: dict, *, index_snapshot: dict | None, ce_snapshot: dict | None, pe_snapshot: dict | None,
                     ce_greeks: dict | None, pe_greeks: dict | None, vix_ltp: float | None,
-                    vix_history: list[float]) -> tuple[bool, str | None, bool]:
+                    vix_history: list[float], index_close_history: list[float]) -> tuple[bool, str | None, bool]:
     """The single decision point program_manager calls -- mirrors
     program_safeguards.can_start_new_cycle's shape (one function, every
     check explicit, the reason string is exactly what gets shown to the
@@ -158,6 +213,9 @@ def evaluate_entry(cfg: dict, *, index_snapshot: dict | None, ce_snapshot: dict 
         session_range_gate(index_snapshot, cfg.get("max_session_range_pct")),
         vix_percentile_gate(vix_ltp, vix_history, cfg.get("vix_percentile_min_days", 10),
                              cfg.get("max_vix_percentile")),
+        squeeze_gate(index_close_history, cfg.get("squeeze_bollinger_period", 20),
+                     cfg.get("squeeze_bollinger_std", 2.0), cfg.get("squeeze_min_days", 10),
+                     cfg.get("max_squeeze_bandwidth_percentile")),
     ]
     for label, greeks in (("CE", ce_greeks), ("PE", pe_greeks)):
         g = greeks or {}

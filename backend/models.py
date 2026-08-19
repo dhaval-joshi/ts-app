@@ -220,6 +220,18 @@ class SafeguardsConfig:
     max_cycles_per_day: int = 5          # beyond this many cycles today, cooldown_minutes applies to every
                                           # subsequent cycle for the rest of the day (not just once)
     cooldown_minutes: int = 5
+    mtm_aware: bool = False              # opt-in, off by default: when True, daily_loss_amount is checked
+                                          # against daily_realized_pnl PLUS this Program's currently-open
+                                          # cycle's live unrealized P&L, every tick, not just realized P&L
+                                          # at cycle-close -- closes the gap where an open cycle bleeding
+                                          # loss is otherwise invisible to every cap until it closes on its
+                                          # own (see program_safeguards.mtm_cycle_pnl and program_manager.py's
+                                          # tick()/_tick_one). A Program that opts in also contributes its
+                                          # live MTM to its Risk Group's and the portfolio's aggregate caps;
+                                          # one that doesn't stays invisible in MTM terms at every tier,
+                                          # exactly like today. NEVER auto-flattens the open cycle -- halts
+                                          # only, matching every other halt in this app (a hard stop never
+                                          # touches currently-open legs).
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "SafeguardsConfig":
@@ -241,6 +253,7 @@ class SafeguardsConfig:
             daily_loss_amount=daily_loss,
             max_cycles_per_day=max_cycles,
             cooldown_minutes=cooldown,
+            mtm_aware=bool(d.get("mtm_aware", False)),
         )
 
 
@@ -307,6 +320,17 @@ class EntrySignalConfig:
                                                         # isn't a real signal
     max_iv_session_rank_pct: Optional[float] = None   # skip unless a leg's live IV ranks below this % of
                                                         # TODAY's own [lowiv, highiv] range -- needs live Greeks
+    max_squeeze_bandwidth_percentile: Optional[float] = None  # skip unless the underlying's Bollinger Band
+                                                        # Width ranks below this percentile of its own recent
+                                                        # sessions -- the actual multi-day squeeze signal (has
+                                                        # price been compressed over DAYS, not just today); see
+                                                        # entry_signals.squeeze_gate
+    squeeze_bollinger_period: int = 20                 # trading days in the Bollinger moving-average window
+    squeeze_bollinger_std: float = 2.0                 # standard deviations for the bands
+    squeeze_min_days: int = 10                         # don't apply max_squeeze_bandwidth_percentile until
+                                                        # this many days of bandwidth HISTORY exist on top of
+                                                        # the period itself (~period+this many days total,
+                                                        # e.g. 20+10=30 trading days before it activates)
     on_greeks_unverifiable: str = "allow"              # "allow" | "skip" -- what to do when
                                                         # max_iv_session_rank_pct is set but Greeks never
                                                         # arrived at all (entitlement unconfirmed for this
@@ -326,24 +350,37 @@ class EntrySignalConfig:
         min_days = int(d.get("vix_percentile_min_days", 10) or 10)
         if min_days < 1:
             raise ValidationError("entry_signals.vix_percentile_min_days must be >= 1")
+        squeeze_period = int(d.get("squeeze_bollinger_period", 20) or 20)
+        if squeeze_period < 2:
+            raise ValidationError("entry_signals.squeeze_bollinger_period must be >= 2")
+        squeeze_std = float(d.get("squeeze_bollinger_std", 2.0) or 2.0)
+        if squeeze_std <= 0:
+            raise ValidationError("entry_signals.squeeze_bollinger_std must be > 0")
+        squeeze_min_days = int(d.get("squeeze_min_days", 10) or 10)
+        if squeeze_min_days < 1:
+            raise ValidationError("entry_signals.squeeze_min_days must be >= 1")
         pct_fields = {
             "max_vix": d.get("max_vix"),
             "max_oi_chng_pct": d.get("max_oi_chng_pct"),
             "max_session_range_pct": d.get("max_session_range_pct"),
             "max_vix_percentile": d.get("max_vix_percentile"),
             "max_iv_session_rank_pct": d.get("max_iv_session_rank_pct"),
+            "max_squeeze_bandwidth_percentile": d.get("max_squeeze_bandwidth_percentile"),
         }
         parsed = {}
         for key, raw in pct_fields.items():
             parsed[key] = _opt_float(raw)
             if parsed[key] is not None and parsed[key] < 0:
                 raise ValidationError(f"entry_signals.{key} must be >= 0")
-        for key in ("max_vix_percentile", "max_iv_session_rank_pct"):
+        for key in ("max_vix_percentile", "max_iv_session_rank_pct", "max_squeeze_bandwidth_percentile"):
             if parsed[key] is not None and parsed[key] > 100:
                 raise ValidationError(f"entry_signals.{key} must be <= 100")
         return cls(
             enabled=bool(d.get("enabled", False)),
             vix_percentile_min_days=min_days,
+            squeeze_bollinger_period=squeeze_period,
+            squeeze_bollinger_std=squeeze_std,
+            squeeze_min_days=squeeze_min_days,
             on_greeks_unverifiable=on_unverifiable,
             **parsed,
         )

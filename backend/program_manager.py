@@ -117,6 +117,8 @@ class ProgramManager:
                                            # they stood then), consumed and cleared in _close_cycle for the
                                            # cycle factsheet -- same "loose top-level key, not on runtime"
                                            # reasoning as `alert` above. None whenever no cycle is active.
+            p.setdefault("mtm_pnl", None)  # transient live display value, refreshed every tick() -- see
+                                           # tick()'s own comment; None until the first tick runs regardless
             # a Program saved before Scheduling/Paper-Live/capital-sizing existed
             # is missing these keys in its config entirely -- backfill sensible
             # defaults so downstream reads never need defensive None-checks
@@ -432,6 +434,27 @@ class ProgramManager:
 
             runtime_map = {pid: sg.ProgramRuntimeState(**p["runtime"]) for pid, p in self._programs.items()}
 
+            # Mark-to-market: an open cycle's live unrealized P&L, per Program that has opted in
+            # (SafeguardsConfig.mtm_aware) -- computed fresh every tick, never persisted, so the Risk
+            # Group/Portfolio aggregate checks below see today's true exposure, not just what's already
+            # realized. A Program that hasn't opted in is simply absent from this map (contributes 0 to
+            # every aggregate below -- today's exact behavior). See program_safeguards.mtm_cycle_pnl.
+            mtm_pnl_map: dict[str, float] = {}
+            for pid, program in self._programs.items():
+                cycle_id = program["runtime"].get("active_cycle_id")
+                if cycle_id and program["config"].get("safeguards", {}).get("mtm_aware"):
+                    om = self._order_manager_for(program["config"])
+                    mtm_pnl_map[pid] = sg.mtm_cycle_pnl(om.get_orders_by_cycle(cycle_id))
+                    # transient, in-memory display value only -- NOT persisted every tick (same reasoning
+                    # as order["last_ltp"]: needless I/O for a value that changes constantly; the frontend
+                    # already polls Program runtime periodically and picks this up straight off the live
+                    # dict). A loose top-level key, not on `runtime`, for the same reason `alert`/
+                    # `active_cycle_snapshot` already are: `runtime` round-trips through a strict dataclass
+                    # every tick and would reject an unknown key.
+                    program["mtm_pnl"] = mtm_pnl_map[pid]
+                else:
+                    program["mtm_pnl"] = None
+
             # ---- tier 1: Risk Group -- halt only THAT group's members ----
             risk_group_caps: dict[str, float] = {}
             for group_id, group in self._risk_groups.items():
@@ -441,7 +464,7 @@ class ProgramManager:
                 member_caps = [self._programs[pid]["config"]["safeguards"]["daily_loss_amount"] for pid in member_ids]
                 group_cap = sg.effective_group_daily_loss_cap(member_caps, group.get("daily_loss_amount_override"))
                 risk_group_caps[group_id] = group_cap
-                group_pnl = sum(runtime_map[pid].daily_realized_pnl for pid in member_ids)
+                group_pnl = sum(runtime_map[pid].daily_realized_pnl + mtm_pnl_map.get(pid, 0.0) for pid in member_ids)
                 newly_halted = sg.apply_group_halt_if_needed(
                     runtime_map, member_ids, group_daily_pnl=group_pnl, group_cap=group_cap,
                     halt_status=sg.HALTED_RISK_GROUP,
@@ -458,7 +481,7 @@ class ProgramManager:
                                                      f"Risk Group '{group['name']}' cap reached")
 
             # ---- tier 2: Portfolio -- toggleable; halts EVERYTHING if enabled ----
-            portfolio_pnl = sum(rt.daily_realized_pnl for rt in runtime_map.values())
+            portfolio_pnl = sum(rt.daily_realized_pnl for rt in runtime_map.values()) + sum(mtm_pnl_map.values())
             portfolio_cfg = store.load_portfolio_safeguards()
             portfolio_enabled = portfolio_cfg.get("enabled", True)
 
@@ -488,7 +511,8 @@ class ProgramManager:
 
             for program in list(self._programs.values()):
                 try:
-                    await self._tick_one(program, now=now, portfolio_pnl=portfolio_pnl, portfolio_cap=portfolio_cap)
+                    await self._tick_one(program, now=now, portfolio_pnl=portfolio_pnl, portfolio_cap=portfolio_cap,
+                                          mtm_pnl=mtm_pnl_map.get(program["config"]["program_id"], 0.0))
                 except Exception:
                     # isolate one Program's failure from every other Program in this same tick,
                     # AND from last_tick_at below -- without this, a single persistently-broken
@@ -504,7 +528,8 @@ class ProgramManager:
                                        # a repeatedly-failing tick loop itself (not a single Program)
                                        # correctly leaves this stale, which is the real "silently died" signal
 
-    async def _tick_one(self, program: dict, *, now: datetime, portfolio_pnl: float, portfolio_cap: float):
+    async def _tick_one(self, program: dict, *, now: datetime, portfolio_pnl: float, portfolio_cap: float,
+                         mtm_pnl: float = 0.0):
         cfg = program["config"]
         rt = program["runtime"]
 
@@ -514,6 +539,30 @@ class ProgramManager:
             terminal = ("closed", "cancelled", "entry_rejected")
             if len(legs) == 2 and all(o["status"] in terminal for o in legs):
                 self._close_cycle(program, legs, now)
+                return
+            # Mark-to-market cap (opt-in, SafeguardsConfig.mtm_aware): every safeguard below this point
+            # in the function only ever runs when NO cycle is active, so an open cycle bleeding
+            # unrealized loss was previously invisible to every cap until it closed on its own -- this
+            # is the one check in the whole safeguard stack that runs WHILE a cycle is still open, and
+            # it deliberately does nothing to the open legs themselves (same "a hard stop never touches
+            # currently-open legs" invariant every other halt in this app already follows) -- it only
+            # ever stops the NEXT cycle from starting.
+            if rt["status"] == sg.RUNNING and cfg.get("safeguards", {}).get("mtm_aware"):
+                effective_pnl = rt["daily_realized_pnl"] + mtm_pnl
+                daily_loss_amount = cfg["safeguards"]["daily_loss_amount"]
+                if effective_pnl <= -abs(daily_loss_amount):
+                    rt["status"] = sg.HALTED_DAILY_LOSS
+                    self._log(program, f"HALTED (mark-to-market): today's P&L including this still-OPEN "
+                                        f"cycle's live unrealized P&L is {effective_pnl:.2f}, past the daily "
+                                        f"loss cap {daily_loss_amount:.2f} (realized so far: "
+                                        f"{rt['daily_realized_pnl']:.2f}, this cycle's live P&L: {mtm_pnl:.2f}). "
+                                        f"The open cycle's own SL/target/trailing keep running untouched -- "
+                                        f"this only stops a NEW cycle from starting once this one closes. "
+                                        f"Resume manually once reviewed.")
+                    failure_log.log_failure(category="program_mtm_daily_loss_halt", order_id=None,
+                                             program_id=cfg["program_id"],
+                                             message=f"Program {cfg['name']}: mark-to-market daily loss cap "
+                                                     f"reached (effective_pnl={effective_pnl:.2f})")
             return
 
         if program.get("archived"):
@@ -728,14 +777,49 @@ class ProgramManager:
             "ce_greeks": out.get("ce_greeks"), "pe_greeks": out.get("pe_greeks"),
         }
 
-    def _maybe_save_daily_vix_snapshot(self, now: datetime, vix_ltp: float):
-        """At most once per calendar day, across every Program -- see
-        config.SIGNAL_HISTORY_DIR's comment for why this is a small
-        forward-only daily scalar log, not a historical-data pipeline."""
-        date_str = now.date().isoformat()
-        if store.load_signal_snapshot(date_str) is not None:
+    def _maybe_update_daily_signal_snapshot(self, now: datetime, *, index_id: str | None = None,
+                                             index_close: float | None = None, vix_ltp: float | None = None):
+        """Read-modify-write, at most touching each field ONCE per calendar
+        day -- VIX and a given index's price can each first arrive on
+        different ticks, from different Programs (a NIFTY Program's gate
+        check runs before any BANKNIFTY Program's does, or vice versa), so
+        this can't be a simple write-once-if-file-absent like the single-
+        scalar version this replaced. See config.SIGNAL_HISTORY_DIR's
+        comment for why this is a small forward-only daily log, not a
+        historical-data pipeline -- captured value is "first price
+        observed this signal today," an approximation of a true close,
+        acceptable because squeeze_gate/vix_percentile_gate are both
+        rolling-window signals over weeks, where day-to-day noise in
+        exactly which intraday moment got captured washes out."""
+        if vix_ltp is None and (index_id is None or index_close is None):
             return
-        store.save_signal_snapshot(date_str, {"date": date_str, "vix_close_seen": vix_ltp})
+        date_str = now.date().isoformat()
+        snap = store.load_signal_snapshot(date_str) or {"date": date_str, "vix_close_seen": None, "index_closes": {}}
+        snap.setdefault("index_closes", {})  # old files (pre-squeeze-detector) lack this key entirely
+        changed = False
+        if vix_ltp is not None and snap.get("vix_close_seen") is None:
+            snap["vix_close_seen"] = vix_ltp
+            changed = True
+        if index_id and index_close is not None and index_id not in snap["index_closes"]:
+            snap["index_closes"][index_id] = index_close
+            changed = True
+        if changed:
+            store.save_signal_snapshot(date_str, snap)
+
+    def _index_close_history(self, index_id: str, days: int) -> list[float]:
+        """This index's daily price history, chronological (oldest first)
+        -- entry_signals.squeeze_gate's input. Reads the same daily files
+        vix_percentile_gate's history comes from; a day with no recorded
+        price for THIS index (e.g. before any Program on it ticked, or a
+        day this Program didn't exist yet) is simply absent, not a gap
+        filled with a guess."""
+        snaps = store.list_recent_signal_snapshots(days=days)  # newest first
+        closes = []
+        for s in reversed(snaps):  # oldest first
+            c = (s.get("index_closes") or {}).get(index_id)
+            if c is not None:
+                closes.append(c)
+        return closes
 
     def _maybe_log_greeks_unverifiable(self, program: dict):
         """Logged once per Program per day (not every 15s tick) -- see
@@ -803,13 +887,24 @@ class ProgramManager:
                 min_days = entry_cfg.get("vix_percentile_min_days", 10)
                 vix_history = [s["vix_close_seen"] for s in store.list_recent_signal_snapshots(days=min_days * 3)
                                 if s.get("vix_close_seen") is not None]
-            if snaps["vix_ltp"] is not None:
-                self._maybe_save_daily_vix_snapshot(now, snaps["vix_ltp"])
+            index_close_history = []
+            if entry_cfg.get("max_squeeze_bandwidth_percentile") is not None:
+                period = entry_cfg.get("squeeze_bollinger_period", 20)
+                min_days = entry_cfg.get("squeeze_min_days", 10)
+                # need `period` days just to compute ONE bandwidth reading, plus `min_days` more
+                # readings' worth of history to rank today's against -- see squeeze_gate's own docstring
+                index_close_history = self._index_close_history(cfg["index_id"], days=(period + min_days) * 2)
+            index_price_now = snaps["index_snapshot"].get("ltp") if snaps["index_snapshot"] else None
+            if index_price_now is not None:
+                index_close_history = index_close_history + [index_price_now]  # today's own reading, not
+                                                                                  # yet in signal_history
+            self._maybe_update_daily_signal_snapshot(now, index_id=cfg["index_id"], index_close=index_price_now,
+                                                       vix_ltp=snaps["vix_ltp"])
 
             allowed, reason, greeks_unverifiable = entry_signals.evaluate_entry(
                 entry_cfg, index_snapshot=snaps["index_snapshot"], ce_snapshot=snaps["ce_snapshot"],
                 pe_snapshot=snaps["pe_snapshot"], ce_greeks=snaps["ce_greeks"], pe_greeks=snaps["pe_greeks"],
-                vix_ltp=snaps["vix_ltp"], vix_history=vix_history,
+                vix_ltp=snaps["vix_ltp"], vix_history=vix_history, index_close_history=index_close_history,
             )
             if greeks_unverifiable:
                 self._maybe_log_greeks_unverifiable(program)

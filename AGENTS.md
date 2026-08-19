@@ -89,6 +89,21 @@ work. This file (plus CLAUDE.md and the README) is the handoff.
   `on_greeks_unverifiable` controls whether that skips or allows the
   cycle), but don't claim confidence about entitlement that hasn't
   actually been observed working against a real market.
+- **A real multi-day squeeze detector (Bollinger Band Width) and a
+  mark-to-market safeguard cap were added**, both to `entry_signals.py`/
+  `program_safeguards.py` respectively, in the very next round after
+  Entry Signal Gates shipped — see the README's "Squeeze detector" and
+  "Mark-to-market cap" BUILT sections. Two things worth knowing if you
+  touch either: `data/signal_history/<date>.json` now stores
+  `index_closes` keyed by `index_id` (not just VIX) via a
+  read-modify-write helper (`_maybe_update_daily_signal_snapshot`,
+  replaced the old write-once version) — don't add a new caller that
+  writes this file directly. And the mark-to-market cap is opt-in per
+  Program (`SafeguardsConfig.mtm_aware`, default `False`) and halts only
+  — it deliberately never auto-flattens the open cycle it detected the
+  breach on; that was an explicit scope decision, not an oversight, and
+  reintroducing auto-flatten-on-halt needs the same deliberate
+  human sign-off this decision got, not a quiet addition.
 
 ## Known open items / deliberately deferred
 
