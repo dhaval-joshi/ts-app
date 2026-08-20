@@ -399,3 +399,29 @@ def list_recent_signal_snapshots(days: int = 20) -> list[dict]:
             continue
     snapshots.sort(key=lambda s: s.get("date", ""), reverse=True)
     return snapshots[:days]
+
+# ------------------------------------------------ reconcile reports --
+
+def _reconcile_report_path(run_id: str) -> Path:
+    return config.RECONCILE_REPORTS_DIR / f"{run_id}.json"
+
+def save_reconcile_report(report: dict) -> None:
+    _atomic_write(_reconcile_report_path(report["run_id"]), report)
+
+def load_reconcile_report(run_id: str) -> Optional[dict]:
+    p = _reconcile_report_path(run_id)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+def list_reconcile_reports(limit: int = 50) -> list[dict]:
+    reports = []
+    for p in config.RECONCILE_REPORTS_DIR.glob("*.json"):
+        try:
+            with open(p) as f:
+                reports.append(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            continue
+    reports.sort(key=lambda r: r.get("started_at", ""), reverse=True)
+    return reports[:limit]

@@ -286,9 +286,14 @@ function renderReconcileReport(report) {
       ? `<div class="mt-3"><div class="text-xs font-medium text-red-700 mb-1">Still open locally, but past expiry -- check for a missed settlement</div>
           ${b.stale_open_orders.map((s) => `<div class="text-[11px] text-red-700">${s.order_id}: ${s.sym_id} (expired ${s.expiry})</div>`).join("")}
          </div>` : "";
+         
+    const checkedCount = (b.counts || {}).checked || 0;
+    const assumedBrokerOrders = checkedCount * 2; // Rough estimate to help explain the difference
+
     return `
       <div class="border border-slate-200 rounded-xl p-4 mb-3">
-        <div class="text-sm font-medium text-slate-900 mb-2">Broker: ${brokerId}</div>
+        <div class="text-sm font-medium text-slate-900 mb-1">Broker: ${brokerId}</div>
+        <div class="text-xs text-slate-500 mb-3">Checked ${checkedCount} local positions (spanning up to ~${assumedBrokerOrders} broker orders)</div>
         ${countsHtml}
         ${findingsHtml}
         ${orphansHtml}

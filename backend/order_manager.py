@@ -179,6 +179,7 @@ class OrderManager:
         o.setdefault("warning", None)
         o.setdefault("trail_update_count", 0)
         o.setdefault("trail_failure_count", 0)
+        o["pnl"].setdefault("slippage", None)
         o.setdefault("entry", {})
         o["entry"].setdefault("filled_at", None)
         o.setdefault("lot_size", 1)
@@ -509,7 +510,7 @@ class OrderManager:
             trigPrice=entry_trig_price,
             validity=req.entry_validity,
             mktProt=entry_mkt_prot,
-            remarks="tjstation",
+            remarks=order_id,
         )
         try:
             resp = await self.client.place_order(**entry_payload)
@@ -581,7 +582,7 @@ class OrderManager:
                     limit_price = _round_down_to_tick(price, tick_size)
                     sq_payload = dict(
                         symId=order["sym_id"], qty=remaining, side=order["exit_side"], type="limit",
-                        product=order["product"], limitPrice=limit_price, validity="day", remarks="tjstation-sq",
+                        product=order["product"], limitPrice=limit_price, validity="day", remarks=order["entry"]["broker_order_id"],
                     )
                     resp = await self.client.place_order(**sq_payload)
                     self._log(order, f"Square-off LIMIT order placed for qty {remaining} @ {limit_price} "
@@ -590,7 +591,7 @@ class OrderManager:
                     sq_payload = dict(
                         symId=order["sym_id"], qty=remaining, side=order["exit_side"], type="market",
                         product=order["product"], validity="day", mktProt=DEFAULT_MARKET_PROTECTION_PERCENT,
-                        remarks="tjstation-sq",
+                        remarks=order["entry"]["broker_order_id"],
                     )
                     resp = await self.client.place_order(**sq_payload)
                     self._log(order, f"Square-off MARKET order placed for qty {remaining}.")
@@ -894,7 +895,8 @@ class OrderManager:
                                  message=f"Square-off {reason_text}", response=response)
         order["square_off"] = None
         order["status"] = "watching"
-        order["close_reason"] = None
+        if order.get("close_reason") not in ("manual", "program_cycle_manual_close", "program_flatten"):
+            order["close_reason"] = None
         order["closing_since"] = None
         store.save_order(order)
 
@@ -902,6 +904,14 @@ class OrderManager:
         order["pnl"]["exit_avg_price"] = exit_avg_price
         order["pnl"]["unrealized"] = None
         order["pnl"]["unrealized_pct"] = None
+        
+        if order.get("close_reason") in ("stop_hit", "target_hit") and exit_avg_price is not None:
+            leg = order["stop"] if order["close_reason"] == "stop_hit" else order["target"]
+            expected = leg.get("current_trig_price")
+            if expected is not None:
+                # Slippage > 0 means we lost money compared to expected price
+                order["pnl"]["slippage"] = round((expected - exit_avg_price) * (1 if order["side"] == "buy" else -1), 4)
+
         entry_avg = order["entry"]["avg_price"]
         if exit_avg_price is None or entry_avg is None:
             return
@@ -1168,6 +1178,7 @@ class OrderManager:
         if not (stop_changed or target_changed):
             return
 
+        order["trail_update_count"] += 1
         store.save_order(order)
         self._log(order, f"Trailing: stop -> {order['stop']['current_trig_price']}, "
                           f"target -> {order['target']['current_trig_price']} (ltp {ltp}).")
@@ -1261,6 +1272,7 @@ def _pending_leg_state(leg_cfg: dict) -> dict:
         "offset_mode": mode,
         "trig_offset": leg_cfg["trig_offset"],
         "limit_offset": leg_cfg["limit_offset"],
+        "initial_trig_price": None,
         "current_trig_price": None,
         "current_limit_price": None,
         "trig_limit_offset": None,
@@ -1300,6 +1312,7 @@ def _finalize_exit_leg(leg: dict, entry_avg_price: float, direction: int, tick_s
     trig_price = _round_to_tick(entry_avg_price + direction * trig_dist, tick_size)
     limit_price = _round_to_tick(trig_price + direction * limit_dist, tick_size)
 
+    leg["initial_trig_price"] = trig_price
     leg["current_trig_price"] = trig_price
     leg["current_limit_price"] = limit_price
     leg["trig_limit_offset"] = round(limit_price - trig_price, 4)

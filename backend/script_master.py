@@ -95,6 +95,7 @@ class ScriptMaster:
         self.client = client
         self._indices: dict[str, IndexRow] = {}       # id -> row
         self._options_by_und: dict[str, list[OptionRow]] = {}  # und_id -> rows
+        self._loaded_on_date: date | None = None
 
     # -------------------------------------------------------------- I/O --
 
@@ -222,16 +223,18 @@ class ScriptMaster:
         self._options_by_und = options_by_und
         log.info("Scrip master: parsed %d/%d NSEOptions rows (%d id-unparseable, %d other failures).",
                   sum(len(v) for v in options_by_und.values()), opt_raw_count, opt_id_unparseable, opt_parse_failures)
+                  
+        from . import clock
+        self._loaded_on_date = clock.today()
 
     # ----------------------------------------------------------- lookups --
 
     def is_loaded(self) -> bool:
-        """True only if at least one Index row actually parsed -- NOT just
-        "the cache files were read." Was previously set unconditionally at
-        the end of _load_from_cache_only(), which meant an empty or fully-
-        unparseable Index.csv still reported as "loaded," with no signal
-        that the Underlying Index picker would be empty."""
-        return bool(self._indices)
+        """True only if at least one Index row actually parsed AND the data
+        was loaded today. This forces a fresh fetch if the app starts up
+        with yesterday's cache."""
+        from . import clock
+        return bool(self._indices) and self._loaded_on_date == clock.today()
 
     def list_indices(self) -> list:
         return sorted([r for r in self._indices.values() if r.avail_flag], key=lambda r: r.disp_name)

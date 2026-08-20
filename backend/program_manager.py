@@ -384,28 +384,36 @@ class ProgramManager:
         if not expiry:
             raise ValueError("No valid expiry found in script master")
 
-        atm_pair = self.script_master.atm_pair(cfg["index_id"], expiry, spot)
-        if not atm_pair:
-            raise ValueError(f"No ATM strike pair found near {spot}")
-
-        atm_ce, atm_pe = atm_pair
-        opt = atm_ce if leg == "CE" else atm_pe
+        capital = (cfg.get("capital_per_leg") or 0) * 2 if cfg.get("sizing_mode") == "capital" else None
         
-        # Size for FULL capital (x2)
+        opt = None
         leg_qty = {}
-        if cfg.get("sizing_mode") == "capital":
-            capital = (cfg.get("capital_per_leg") or 0) * 2
-            leg_stream_symbol = f"{opt.exc_token}_NFO"
-            leg_price = await om.fetch_live_price(leg_stream_symbol, timeout=5.0)
-            if leg_price is None:
-                raise ValueError(f"No live price for {leg} leg ({opt.id}) to size by capital")
-            effective_price = leg_price + CAPITAL_SIZING_SLIPPAGE_POINTS
-            lots = int(capital / effective_price) // opt.lot if effective_price > 0 else 0
-            if lots < 1:
-                raise ValueError(f"Capital {capital} too small for 1 lot at {effective_price}")
-            leg_qty[leg] = lots * opt.lot
-        else:
-            leg_qty[leg] = opt.lot * cfg["lots_per_leg"] * 2
+        for offset in range(4): # 0 to 3
+            pair = self.script_master.strike_pair_at_offset(cfg["index_id"], expiry, spot, offset_steps=offset)
+            if not pair:
+                continue
+            
+            candidate_opt = pair[0] if leg == "CE" else pair[1]
+            
+            if capital is not None:
+                stream_symbol = f"{candidate_opt.exc_token}_NFO"
+                price = await om.fetch_live_price(stream_symbol, timeout=5.0)
+                if price is None:
+                    continue
+                effective_price = price + CAPITAL_SIZING_SLIPPAGE_POINTS
+                lots = int(capital / effective_price) // candidate_opt.lot if effective_price > 0 else 0
+                if lots >= 1:
+                    opt = candidate_opt
+                    leg_qty[leg] = lots * candidate_opt.lot
+                    break
+            else:
+                opt = candidate_opt
+                leg_qty[leg] = candidate_opt.lot * cfg["lots_per_leg"] * 2
+                break
+                
+        if not opt:
+            raise ValueError(f"No suitable strike found up to ATM±3 for {leg} (insufficient capital or chain data)")
+
 
         # Check margin
         is_live = hasattr(om.client, "get_basket_margin")
