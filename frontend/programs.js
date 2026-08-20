@@ -467,7 +467,7 @@ function programFormHtml(p) {
     trail_check_interval_seconds: 0, exit_confirmation_windows: 1, stop_breach_force_close_count: 0,
     entry_signals: { enabled: false, max_vix: null, max_oi_chng_pct: null, max_session_range_pct: null,
       max_vix_percentile: null, vix_percentile_min_days: 10, max_iv_session_rank_pct: null,
-      max_squeeze_bandwidth_percentile: null, squeeze_bollinger_period: 20, squeeze_bollinger_std: 2.0,
+      require_ttm_squeeze: false, squeeze_bollinger_period: 20, squeeze_bollinger_std: 2.0, squeeze_keltner_mult: 1.5,
       squeeze_min_days: 10, on_greeks_unverifiable: "allow" },
   };
   const indexOptions = indicesCache.map((i) => `<option value="${i.index_id}" ${i.index_id === cfg.index_id ? "selected" : ""}>${i.disp_name}</option>`).join("");
@@ -510,10 +510,15 @@ function programFormHtml(p) {
           </select>
         </div>
         <div><label class="field-label">Entry Mode</label>
-          <select name="entry_mode" class="js-enhance-select field-input">
+          <select name="entry_mode" class="js-enhance-select field-input" onchange="if(window.onEntryModeChange) window.onEntryModeChange(this)">
             <option value="auto_pair" ${!cfg.entry_mode || cfg.entry_mode === "auto_pair" ? "selected" : ""}>Auto-Pair (Straddle/Strangle)</option>
             <option value="manual_single_leg" ${cfg.entry_mode === "manual_single_leg" ? "selected" : ""}>Manual Single-Leg</option>
+            <option value="signal_single_leg" ${cfg.entry_mode === "signal_single_leg" ? "selected" : ""}>Signal Single-Leg (Breakout)</option>
           </select>
+        </div>
+        <div id="orbDurationField" class="${cfg.entry_mode === 'signal_single_leg' ? '' : 'hidden'}">
+          <label class="field-label">ORB Tracking Duration (mins)</label>
+          <input name="orb_duration_minutes" type="number" min="1" step="1" value="${cfg.orb_duration_minutes || 15}" class="field-input" />
         </div>
         <div><label class="field-label">Min working days to expiry</label><input name="min_working_days_to_expiry" type="number" min="0" step="1" value="${cfg.min_working_days_to_expiry}" class="field-input" /></div>
       </div>
@@ -645,16 +650,21 @@ function programFormHtml(p) {
         <div class="grid sm:grid-cols-2 gap-3">
           <div><label class="field-label">Max India VIX</label><input name="entry_signals_max_vix" type="number" min="0" step="any" value="${cfg.entry_signals.max_vix ?? ""}" placeholder="e.g. 18 -- blank = off" class="field-input" />
             <p class="text-[11px] text-slate-400 mt-1">Skip the cycle if India VIX is above this -- premium already expensive for a long-vol entry.</p></div>
-          <div><label class="field-label">Max OI change (%)</label><input name="entry_signals_max_oi_chng_pct" type="number" min="0" step="any" value="${cfg.entry_signals.max_oi_chng_pct ?? ""}" placeholder="e.g. 50 -- blank = off" class="field-input" />
+          <div id="gate_max_oi"><label class="field-label">Max OI change (%)</label><input name="entry_signals_max_oi_chng_pct" type="number" min="0" step="any" value="${cfg.entry_signals.max_oi_chng_pct ?? ""}" placeholder="e.g. 50 -- blank = off" class="field-input" />
             <p class="text-[11px] text-slate-400 mt-1">Skip if either leg's Open Interest has already built up more than this % today.</p></div>
-          <div><label class="field-label">Max session range (% of open)</label><input name="entry_signals_max_session_range_pct" type="number" min="0" step="any" value="${cfg.entry_signals.max_session_range_pct ?? ""}" placeholder="e.g. 1.5 -- blank = off" class="field-input" />
+          <div id="gate_max_session_range"><label class="field-label">Max session range (% of open)</label><input name="entry_signals_max_session_range_pct" type="number" min="0" step="any" value="${cfg.entry_signals.max_session_range_pct ?? ""}" placeholder="e.g. 1.5 -- blank = off" class="field-input" />
             <p class="text-[11px] text-slate-400 mt-1">Skip once today's (high-low)/open on the underlying already exceeds this -- avoids entering AFTER the day's move already happened.</p></div>
           <div><label class="field-label">Max VIX percentile</label><input name="entry_signals_max_vix_percentile" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_vix_percentile ?? ""}" placeholder="e.g. 40 -- blank = off" class="field-input" />
             <p class="text-[11px] text-slate-400 mt-1">Skip unless today's VIX ranks below this percentile of its own recent history (builds up automatically, a small daily snapshot -- needs the minimum days below before it applies).</p></div>
           <div><label class="field-label">VIX percentile: minimum days of history</label><input name="entry_signals_vix_percentile_min_days" type="number" min="1" step="1" value="${cfg.entry_signals.vix_percentile_min_days ?? 10}" class="field-input" /></div>
           <div><label class="field-label">Max IV session rank (%)</label><input name="entry_signals_max_iv_session_rank_pct" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_iv_session_rank_pct ?? ""}" placeholder="e.g. 30 -- blank = off" class="field-input" />
             <p class="text-[11px] text-slate-400 mt-1">Skip unless a leg's live IV ranks below this % of TODAY's own IV range -- needs live Greeks from the broker; entitlement for that channel isn't guaranteed (see the option below).</p></div>
-          <div><label class="field-label">Max squeeze bandwidth percentile</label><input name="entry_signals_max_squeeze_bandwidth_percentile" type="number" min="0" max="100" step="any" value="${cfg.entry_signals.max_squeeze_bandwidth_percentile ?? ""}" placeholder="e.g. 30 -- blank = off" class="field-input" />
+          <div>
+            <label class="field-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+              <input name="entry_signals_require_ttm_squeeze" type="checkbox" ${cfg.entry_signals.require_ttm_squeeze ? 'checked' : ''} />
+              Require TTM Squeeze (Bollinger in Keltner)
+            </label>
+          </div>
             <p class="text-[11px] text-slate-400 mt-1">Skip unless the underlying's Bollinger Band Width ranks below this percentile of its own recent sessions -- the real multi-day squeeze signal (price compressed over DAYS, not just today). Builds up automatically from the same daily history as the VIX percentile gate; needs ~(period + min days) trading days before it applies -- roughly 6 weeks at the defaults below.</p></div>
           <div><label class="field-label">Squeeze: Bollinger period (days)</label><input name="entry_signals_squeeze_bollinger_period" type="number" min="2" step="1" value="${cfg.entry_signals.squeeze_bollinger_period ?? 20}" class="field-input" /></div>
           <div><label class="field-label">Squeeze: Bollinger std deviations</label><input name="entry_signals_squeeze_bollinger_std" type="number" min="0.1" step="any" value="${cfg.entry_signals.squeeze_bollinger_std ?? 2.0}" class="field-input" /></div>
@@ -733,6 +743,7 @@ async function submitProgramForm() {
     mode: fd.get("mode") || "live",
     broker_id: fd.get("broker_id") || "tradejini",
     entry_mode: fd.get("entry_mode") || "auto_pair",
+    orb_duration_minutes: num(fd.get("orb_duration_minutes")) || 15,
     lots_per_leg: num(fd.get("lots_per_leg")) || 1,
     sizing_mode: fd.get("sizing_mode") || "lots",
     capital_per_leg: num(fd.get("capital_per_leg")),
@@ -788,7 +799,7 @@ async function submitProgramForm() {
       max_vix_percentile: num(fd.get("entry_signals_max_vix_percentile")),
       vix_percentile_min_days: num(fd.get("entry_signals_vix_percentile_min_days")) || 10,
       max_iv_session_rank_pct: num(fd.get("entry_signals_max_iv_session_rank_pct")),
-      max_squeeze_bandwidth_percentile: num(fd.get("entry_signals_max_squeeze_bandwidth_percentile")),
+      require_ttm_squeeze: fd.get("entry_signals_require_ttm_squeeze") === "on",
       squeeze_bollinger_period: num(fd.get("entry_signals_squeeze_bollinger_period")) || 20,
       squeeze_bollinger_std: num(fd.get("entry_signals_squeeze_bollinger_std")) || 2.0,
       squeeze_min_days: num(fd.get("entry_signals_squeeze_min_days")) || 10,
@@ -1127,3 +1138,37 @@ setInterval(() => {
   const section = document.getElementById("section-advanced");
   if (section && !section.classList.contains("hidden")) loadAdvancedOms();
 }, 20000);
+
+window.onEntryModeChange = function(select) {
+  const isSignal = select.value === "signal_single_leg";
+  const orbField = document.getElementById("orbDurationField");
+  if (orbField) orbField.classList.toggle("hidden", !isSignal);
+
+  const maxOiGate = document.getElementById("gate_max_oi");
+  if (maxOiGate) maxOiGate.classList.toggle("hidden", isSignal);
+
+  const maxSessionRangeGate = document.getElementById("gate_max_session_range");
+  if (maxSessionRangeGate) maxSessionRangeGate.classList.toggle("hidden", isSignal);
+
+  if (isSignal) {
+    const form = select.closest("form");
+    if (form) {
+      // Auto-populate prop-desk standards
+      const bp = form.querySelector('[name="entry_signals_squeeze_bollinger_period"]');
+      if (bp) bp.value = 20;
+      
+      const sqz = form.querySelector('[name="entry_signals_require_ttm_squeeze"]');
+      if (sqz) sqz.checked = true;
+      const vix = form.querySelector('[name="entry_signals_max_vix_percentile"]');
+      if (vix) vix.value = 80;
+      
+      // We should check the "enable entry signals" checkbox if it exists
+      const enableSignals = form.querySelector('[name="entry_signals_enabled"]');
+      if (enableSignals && !enableSignals.checked) {
+         enableSignals.checked = true;
+         // Trigger change to show the entry signals section
+         enableSignals.dispatchEvent(new Event('change'));
+      }
+    }
+  }
+};

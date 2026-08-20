@@ -23,6 +23,7 @@ from .order_manager import OrderManager
 from .script_master import ScriptMaster
 from .program_manager import ProgramManager
 from .indicators import IndicatorService
+from .signal_engine import SignalEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("tradejini.main")
@@ -34,6 +35,7 @@ stream: StreamManager | None = None
 script_master: ScriptMaster | None = None
 programs: ProgramManager | None = None
 indicators: IndicatorService | None = None
+signal_engine: SignalEngine | None = None
 _ws_clients: set[WebSocket] = set()
 
 SCRIP_MASTER_REFRESH_INTERVAL_SECONDS = 6 * 3600  # Tradejini's own data only changes once/day (BOD process);
@@ -48,7 +50,7 @@ _heartbeat_state: dict = {"zone": heartbeat.GREEN, "internet_up": True, "entitie
 
 @asynccontextmanager
 async def lifespan(app):
-    global manager, paper_manager, stream, script_master, programs, indicators
+    global manager, paper_manager, stream, script_master, programs, indicators, signal_engine
 
     # Deliberately the ONE thing in this app that's allowed to refuse to
     # start at all -- unlike the Tradejini connection below (transient,
@@ -72,6 +74,7 @@ async def lifespan(app):
     script_master = ScriptMaster(client)
     indicators = IndicatorService(client)
     programs = ProgramManager(manager, paper_manager, script_master)
+    signal_engine = SignalEngine(programs, script_master)
 
     await manager.load_from_disk()
     await paper_manager.load_from_disk()
@@ -153,10 +156,17 @@ async def _script_master_refresh_loop():
     Never crashes the app; a failed refresh just means Program cycle-starts
     keep using whatever's cached (or decline to start, with a clear log
     line, if nothing has ever loaded yet) until the next attempt."""
+    backfilled_once = False
     while True:
         if client.is_logged_in:
             try:
                 await script_master.refresh()
+                if not backfilled_once:
+                    symbol_ids = list(script_master._indices.keys())
+                    if "IDX_-15_NSE" not in symbol_ids:
+                        symbol_ids.append("IDX_-15_NSE")
+                    asyncio.create_task(indicators.backfill_daily_signals(symbol_ids, days_back=30))
+                    backfilled_once = True
             except Exception:
                 log.exception("Scrip master refresh failed -- will retry.")
         await asyncio.sleep(SCRIP_MASTER_REFRESH_INTERVAL_SECONDS if script_master.is_loaded() else 60)
@@ -210,6 +220,8 @@ async def _stream_consumer_loop():
             elif "ltp" in data:
                 if indicators:
                     indicators.handle_l1_tick(data)
+                if signal_engine:
+                    signal_engine.handle_l1_tick(data)
                 await manager.handle_l1_tick(data)
                 await paper_manager.handle_l1_tick(data)  # paper fills are driven entirely by ticks (no
                                                              # real broker event to nudge on) -- this keeps

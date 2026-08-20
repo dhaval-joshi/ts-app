@@ -320,17 +320,15 @@ class EntrySignalConfig:
                                                         # isn't a real signal
     max_iv_session_rank_pct: Optional[float] = None   # skip unless a leg's live IV ranks below this % of
                                                         # TODAY's own [lowiv, highiv] range -- needs live Greeks
-    max_squeeze_bandwidth_percentile: Optional[float] = None  # skip unless the underlying's Bollinger Band
-                                                        # Width ranks below this percentile of its own recent
-                                                        # sessions -- the actual multi-day squeeze signal (has
-                                                        # price been compressed over DAYS, not just today); see
-                                                        # entry_signals.squeeze_gate
+    require_ttm_squeeze: bool = False                 # skip unless the underlying's Bollinger Bands are currently
+                                                        # inside its Keltner Channels (the John Carter TTM Squeeze);
+                                                        # see entry_signals.squeeze_gate
     squeeze_bollinger_period: int = 20                 # trading days in the Bollinger moving-average window
     squeeze_bollinger_std: float = 2.0                 # standard deviations for the bands
     squeeze_min_days: int = 10                         # don't apply max_squeeze_bandwidth_percentile until
-                                                        # this many days of bandwidth HISTORY exist on top of
                                                         # the period itself (~period+this many days total,
                                                         # e.g. 20+10=30 trading days before it activates)
+    squeeze_keltner_mult: float = 1.5                  # ATR multiplier for the Keltner Channels
     on_greeks_unverifiable: str = "allow"              # "allow" | "skip" -- what to do when
                                                         # max_iv_session_rank_pct is set but Greeks never
                                                         # arrived at all (entitlement unconfirmed for this
@@ -359,27 +357,31 @@ class EntrySignalConfig:
         squeeze_min_days = int(d.get("squeeze_min_days", 10) or 10)
         if squeeze_min_days < 1:
             raise ValidationError("entry_signals.squeeze_min_days must be >= 1")
+        squeeze_keltner = float(d.get("squeeze_keltner_mult", 1.5) or 1.5)
+        if squeeze_keltner <= 0:
+            raise ValidationError("entry_signals.squeeze_keltner_mult must be > 0")
         pct_fields = {
             "max_vix": d.get("max_vix"),
             "max_oi_chng_pct": d.get("max_oi_chng_pct"),
             "max_session_range_pct": d.get("max_session_range_pct"),
             "max_vix_percentile": d.get("max_vix_percentile"),
             "max_iv_session_rank_pct": d.get("max_iv_session_rank_pct"),
-            "max_squeeze_bandwidth_percentile": d.get("max_squeeze_bandwidth_percentile"),
         }
         parsed = {}
         for key, raw in pct_fields.items():
             parsed[key] = _opt_float(raw)
             if parsed[key] is not None and parsed[key] < 0:
                 raise ValidationError(f"entry_signals.{key} must be >= 0")
-        for key in ("max_vix_percentile", "max_iv_session_rank_pct", "max_squeeze_bandwidth_percentile"):
+        for key in ("max_vix_percentile", "max_iv_session_rank_pct"):
             if parsed[key] is not None and parsed[key] > 100:
                 raise ValidationError(f"entry_signals.{key} must be <= 100")
         return cls(
             enabled=bool(d.get("enabled", False)),
             vix_percentile_min_days=min_days,
+            require_ttm_squeeze=bool(d.get("require_ttm_squeeze", False)),
             squeeze_bollinger_period=squeeze_period,
             squeeze_bollinger_std=squeeze_std,
+            squeeze_keltner_mult=squeeze_keltner,
             squeeze_min_days=squeeze_min_days,
             on_greeks_unverifiable=on_unverifiable,
             **parsed,
@@ -410,7 +412,8 @@ class ProgramConfig:
                                               # anything yet; no Super Program entity exists. Every Program
                                               # created today gets None and stays a fully independent
                                               # Program in every respect.
-    entry_mode: str = "auto_pair"             # "auto_pair" | "manual_single_leg"
+    entry_mode: str = "auto_pair"             # "auto_pair" | "manual_single_leg" | "signal_single_leg"
+    orb_duration_minutes: int = 15            # ORB tracking window duration in minutes (when entry_mode == "signal_single_leg")
     min_working_days_to_expiry: int = 2
     lots_per_leg: int = 1     # used when sizing_mode == "lots" (both legs always equal)
     sizing_mode: str = "lots"  # "lots" | "capital"
@@ -483,8 +486,11 @@ class ProgramConfig:
         if mode not in ("live", "paper"):
             raise ValidationError('mode must be "live" or "paper"')
         entry_mode = d.get("entry_mode") or "auto_pair"
-        if entry_mode not in ("auto_pair", "manual_single_leg"):
-            raise ValidationError('entry_mode must be "auto_pair" or "manual_single_leg"')
+        if entry_mode not in ("auto_pair", "manual_single_leg", "signal_single_leg"):
+            raise ValidationError('entry_mode must be "auto_pair", "manual_single_leg", or "signal_single_leg"')
+        orb_duration = int(d.get("orb_duration_minutes", 15) or 15)
+        if orb_duration <= 0:
+            raise ValidationError("orb_duration_minutes must be > 0")
         broker_id = (d.get("broker_id") or "tradejini").strip()
         super_program_id = d.get("super_program_id") or None
         sizing_mode = d.get("sizing_mode") or "lots"
@@ -515,6 +521,7 @@ class ProgramConfig:
             product=product,
             mode=mode,
             entry_mode=entry_mode,
+            orb_duration_minutes=orb_duration,
             broker_id=broker_id,
             super_program_id=super_program_id,
             min_working_days_to_expiry=min_wd,

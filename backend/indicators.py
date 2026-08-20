@@ -75,6 +75,74 @@ class IndicatorService:
             except Exception as e:
                 log.error("Failed to bootstrap historical data for %s: %s", symbol_id, e)
 
+    async def backfill_daily_signals(self, symbol_ids: List[str], days_back: int = 30):
+        """Fetches 1-minute historical data for symbols (e.g. VIX, NIFTY) over the last N days,
+        aggregates them to daily OHLCV, and writes them into store.signal_history so that
+        the Squeeze and VIX percentile gates are primed instantly without waiting days."""
+        from . import clock, store
+
+        for symbol_id in symbol_ids:
+            try:
+                to_ts = int(time.time())
+                from_ts = to_ts - (days_back * 24 * 3600)
+                
+                resp = await self.client.get_interval_chart_data(symbol_id, "1", from_ts, to_ts)
+                raw_bars = resp.get("bars", []) if isinstance(resp, dict) else resp
+                if not raw_bars and isinstance(resp, dict):
+                    raw_bars = resp.get("chartData", [])
+
+                daily_bars = {}  # date_str -> {"open", "high", "low", "close", "volume"}
+                for row in raw_bars:
+                    # extract timestamp and OHLCV
+                    ts = 0
+                    o, h, l, c, v = 0.0, 0.0, 0.0, 0.0, 0.0
+                    if isinstance(row, list) and len(row) >= 5:
+                        ts = int(row[0] / 1000) if row[0] > 1e11 else int(row[0])
+                        o, h, l, c = float(row[1]), float(row[2]), float(row[3]), float(row[4])
+                        v = float(row[5]) if len(row) > 5 else 0.0
+                    elif isinstance(row, dict):
+                        raw_ts = row.get("t") or row.get("timestamp") or 0
+                        ts = int(raw_ts / 1000) if raw_ts > 1e11 else int(raw_ts)
+                        o = float(row.get("o") or row.get("open", 0))
+                        h = float(row.get("h") or row.get("high", 0))
+                        l = float(row.get("l") or row.get("low", 0))
+                        c = float(row.get("c") or row.get("close", 0))
+                        v = float(row.get("v") or row.get("volume", 0))
+                    
+                    if ts > 0:
+                        dt = datetime.fromtimestamp(ts, tz=clock.IST)
+                        date_str = dt.date().isoformat()
+                        
+                        if date_str not in daily_bars:
+                            daily_bars[date_str] = {"open": o, "high": h, "low": l, "close": c, "volume": v}
+                        else:
+                            daily_bars[date_str]["high"] = max(daily_bars[date_str]["high"], h)
+                            daily_bars[date_str]["low"] = min(daily_bars[date_str]["low"], l)
+                            daily_bars[date_str]["close"] = c
+                            daily_bars[date_str]["volume"] += v
+
+                # Now merge into the store
+                is_vix = symbol_id == "IDX_-15_NSE"
+                for date_str, bar in daily_bars.items():
+                    snap = store.load_signal_snapshot(date_str) or {"date": date_str, "vix_close_seen": None, "index_closes": {}}
+                    snap.setdefault("index_closes", {})
+                    changed = False
+                    if is_vix:
+                        # VIX percentiles only need the close
+                        if snap.get("vix_close_seen") != bar["close"]:
+                            snap["vix_close_seen"] = bar["close"]
+                            changed = True
+                    else:
+                        if snap["index_closes"].get(symbol_id) != bar:
+                            snap["index_closes"][symbol_id] = bar
+                            changed = True
+                    if changed:
+                        store.save_signal_snapshot(date_str, snap)
+
+                log.info("Backfilled %d daily bars for %s", len(daily_bars), symbol_id)
+            except Exception as e:
+                log.error("Failed to backfill daily signals for %s: %s", symbol_id, e)
+
     def handle_l1_tick(self, data: dict):
         """Process a live tick, updating the current 1-min bar or opening a new one."""
         symbol_id = data.get("symbol") # trading symbol token, formatted like 26000_NSE

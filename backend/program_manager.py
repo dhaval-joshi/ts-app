@@ -693,8 +693,9 @@ class ProgramManager:
             return  # never starts a new cycle while archived, regardless of status -- but an
                      # already-open cycle (handled above) still gets tracked/closed normally
 
-        if cfg.get("entry_mode") == "manual_single_leg":
-            return  # manual entry programs never auto-start cycles via tick -- they rely exclusively on start_manual_single_leg_cycle
+        entry_mode = cfg.get("entry_mode", "auto_pair")
+        if entry_mode in ("manual_single_leg", "signal_single_leg"):
+            return  # single-leg programs never auto-start cycles via time-tick -- they rely on explicit triggers
 
         schedule = cfg.get("schedule", {})
         expiry_dates = set(self.script_master.available_expiries(cfg["index_id"])) if schedule.get("days") == "expiry_day" else set()
@@ -933,7 +934,7 @@ class ProgramManager:
         if changed:
             store.save_signal_snapshot(date_str, snap)
 
-    def _index_close_history(self, index_id: str, days: int) -> list[float]:
+    def _index_history(self, index_id: str, days: int) -> list[dict]:
         """This index's daily price history, chronological (oldest first)
         -- entry_signals.squeeze_gate's input. Reads the same daily files
         vix_percentile_gate's history comes from; a day with no recorded
@@ -941,12 +942,16 @@ class ProgramManager:
         day this Program didn't exist yet) is simply absent, not a gap
         filled with a guess."""
         snaps = store.list_recent_signal_snapshots(days=days)  # newest first
-        closes = []
+        history = []
         for s in reversed(snaps):  # oldest first
             c = (s.get("index_closes") or {}).get(index_id)
             if c is not None:
-                closes.append(c)
-        return closes
+                if isinstance(c, dict):
+                    history.append(c)
+                else:
+                    # Legacy fallback
+                    history.append({"open": c, "high": c, "low": c, "close": c, "volume": 0.0})
+        return history
 
     def _maybe_log_greeks_unverifiable(self, program: dict):
         """Logged once per Program per day (not every 15s tick) -- see
@@ -1014,24 +1019,25 @@ class ProgramManager:
                 min_days = entry_cfg.get("vix_percentile_min_days", 10)
                 vix_history = [s["vix_close_seen"] for s in store.list_recent_signal_snapshots(days=min_days * 3)
                                 if s.get("vix_close_seen") is not None]
-            index_close_history = []
+            index_history = []
             if entry_cfg.get("max_squeeze_bandwidth_percentile") is not None:
                 period = entry_cfg.get("squeeze_bollinger_period", 20)
                 min_days = entry_cfg.get("squeeze_min_days", 10)
                 # need `period` days just to compute ONE bandwidth reading, plus `min_days` more
                 # readings' worth of history to rank today's against -- see squeeze_gate's own docstring
-                index_close_history = self._index_close_history(cfg["index_id"], days=(period + min_days) * 2)
+                index_history = self._index_history(cfg["index_id"], days=(period + min_days) * 2)
             index_price_now = snaps["index_snapshot"].get("ltp") if snaps["index_snapshot"] else None
             if index_price_now is not None:
-                index_close_history = index_close_history + [index_price_now]  # today's own reading, not
+                index_history = index_history + [{"open": index_price_now, "high": index_price_now, "low": index_price_now, "close": index_price_now, "volume": 0.0}]  # today's own reading, not
                                                                                   # yet in signal_history
+            # Note: _maybe_update_daily_signal_snapshot takes the float, it wraps it internally if needed
             self._maybe_update_daily_signal_snapshot(now, index_id=cfg["index_id"], index_close=index_price_now,
                                                        vix_ltp=snaps["vix_ltp"])
 
             allowed, reason, greeks_unverifiable = entry_signals.evaluate_entry(
                 entry_cfg, index_snapshot=snaps["index_snapshot"], ce_snapshot=snaps["ce_snapshot"],
                 pe_snapshot=snaps["pe_snapshot"], ce_greeks=snaps["ce_greeks"], pe_greeks=snaps["pe_greeks"],
-                vix_ltp=snaps["vix_ltp"], vix_history=vix_history, index_close_history=index_close_history,
+                vix_ltp=snaps["vix_ltp"], vix_history=vix_history, index_history=index_history,
             )
             if greeks_unverifiable:
                 self._maybe_log_greeks_unverifiable(program)
@@ -1149,3 +1155,170 @@ class ProgramManager:
             "widen_offset": offset,
         }
         store.save_program(program)
+
+    async def start_signal_single_leg_cycle(self, program_id: str, leg_direction: str):
+        """Triggered by the Signal Engine (e.g. ORB breakout). Enters a SINGLE leg (CE or PE).
+        Follows the same safeguard/margin logic as auto_pair, but for one direction."""
+        program = self._require(program_id)
+        now = clock.now()
+        cfg = program["config"]
+        rt = program["runtime"]
+        om = self._order_manager_for(cfg)
+
+        if rt.get("active_cycle_id"):
+            self._log(program, f"Ignoring {leg_direction} signal trigger -- a cycle is already active.")
+            return
+            
+        if rt["status"] != sg.RUNNING:
+            self._log(program, f"Ignoring {leg_direction} signal trigger -- Program is {rt['status']}.")
+            return
+
+        portfolio_pnl = sum(p["runtime"].get("daily_realized_pnl", 0.0) for p in self._programs.values())
+        portfolio_cap = getattr(config, "PORTFOLIO_DAILY_LOSS_AMOUNT", 100000.0)
+
+        allowed, reason = sg.can_start_new_cycle(
+            program_status=rt["status"], active_cycle_id=rt["active_cycle_id"],
+            cooldown_until=rt["cooldown_until"], consecutive_losses=rt["consecutive_losses"],
+            daily_realized_pnl=rt["daily_realized_pnl"], now=now,
+            consecutive_loss_limit=cfg["safeguards"]["consecutive_loss_limit"],
+            daily_loss_amount=cfg["safeguards"]["daily_loss_amount"],
+            portfolio_daily_pnl=portfolio_pnl, portfolio_daily_loss_cap=portfolio_cap,
+        )
+        if not allowed:
+            self._log(program, f"Ignoring {leg_direction} signal trigger -- {reason}")
+            return
+
+        index_row = self.script_master.get_index(cfg["index_id"])
+        if not index_row:
+            return
+
+        index_stream_symbol = f"{index_row.exc_token}_NSE"
+        spot = await om.fetch_live_price(index_stream_symbol, timeout=8.0)
+        if spot is None:
+            self._log(program, f"Signal {leg_direction} trigger failed: no live price for {index_row.disp_name}.")
+            return
+
+        expiry = self.script_master.next_expiry(
+            cfg["index_id"], min_working_days=cfg["min_working_days_to_expiry"],
+            holidays=self._holidays, today=now.date(),
+        )
+        if not expiry:
+            return
+
+        atm_pair = self.script_master.atm_pair(cfg["index_id"], expiry, spot)
+        if not atm_pair:
+            return
+
+        ce, pe = atm_pair
+        opt = ce if leg_direction == "CE" else pe
+
+        # Optional live-market precondition check (entry_signals)
+        entry_cfg = cfg.get("entry_signals") or {}
+        if entry_cfg.get("enabled"):
+            ce_stream_symbol, pe_stream_symbol = f"{ce.exc_token}_NFO", f"{pe.exc_token}_NFO"
+            snaps = await self._fetch_entry_signal_snapshots(om, entry_cfg, index_stream_symbol,
+                                                               ce_stream_symbol, pe_stream_symbol)
+            vix_history = []
+            if entry_cfg.get("max_vix_percentile") is not None:
+                min_days = entry_cfg.get("vix_percentile_min_days", 10)
+                vix_history = [s["vix_close_seen"] for s in store.list_recent_signal_snapshots(days=min_days * 3)
+                                if s.get("vix_close_seen") is not None]
+            index_history = []
+            if entry_cfg.get("max_squeeze_bandwidth_percentile") is not None:
+                period = entry_cfg.get("squeeze_bollinger_period", 20)
+                min_days = entry_cfg.get("squeeze_min_days", 10)
+                index_history = self._index_history(cfg["index_id"], days=(period + min_days) * 2)
+            index_price_now = snaps["index_snapshot"].get("ltp") if snaps["index_snapshot"] else None
+            if index_price_now is not None:
+                index_history = index_history + [{"open": index_price_now, "high": index_price_now, "low": index_price_now, "close": index_price_now, "volume": 0.0}]
+            
+            self._maybe_update_daily_signal_snapshot(now, index_id=cfg["index_id"], index_close=index_price_now,
+                                                       vix_ltp=snaps["vix_ltp"])
+
+            allowed, reason, greeks_unverifiable = entry_signals.evaluate_entry(
+                entry_cfg, index_snapshot=snaps["index_snapshot"], 
+                ce_snapshot=snaps["ce_snapshot"] if leg_direction == "CE" else None,
+                pe_snapshot=snaps["pe_snapshot"] if leg_direction == "PE" else None, 
+                ce_greeks=snaps["ce_greeks"] if leg_direction == "CE" else None, 
+                pe_greeks=snaps["pe_greeks"] if leg_direction == "PE" else None,
+                vix_ltp=snaps["vix_ltp"], vix_history=vix_history, index_history=index_history,
+            )
+            if greeks_unverifiable:
+                self._maybe_log_greeks_unverifiable(program)
+            if not allowed:
+                self._log(program, f"Signal {leg_direction} trigger blocked by entry gates: {reason}.")
+                return
+
+        # Sizing
+        leg_qty = {}
+        if cfg.get("sizing_mode") == "capital":
+            capital = cfg.get("capital_per_leg") or 0
+            leg_stream_symbol = f"{opt.exc_token}_NFO"
+            leg_price = await om.fetch_live_price(leg_stream_symbol, timeout=5.0)
+            if leg_price is None:
+                self._log(program, f"Signal trigger failed: no live price for {leg_direction} to size by capital.")
+                return
+            effective_price = leg_price + CAPITAL_SIZING_SLIPPAGE_POINTS
+            lots = int(capital / effective_price) // opt.lot if effective_price > 0 else 0
+            if lots < 1:
+                self._log(program, f"Signal trigger failed: capital {capital} too small for 1 lot.")
+                return
+            leg_qty[leg_direction] = lots * opt.lot
+            # For buffer check, we need the unused leg to be 0
+            leg_qty["CE" if leg_direction == "PE" else "PE"] = 0
+        else:
+            leg_qty[leg_direction] = opt.lot * cfg["lots_per_leg"]
+            leg_qty["CE" if leg_direction == "PE" else "PE"] = 0
+            
+        # Margin Check
+        is_live = hasattr(om.client, "get_basket_margin")
+        if is_live:
+            ok, margin_reason = await self._check_buffered_margin(om, cfg, ce, pe, leg_qty)
+            if not ok:
+                self._log(program, f"Signal trigger failed: {margin_reason}")
+                return
+
+        self._clear_program_alert(program)
+        cycle_id = uuid.uuid4().hex[:12]
+        self._log(program, f"Signal Trigger {leg_direction}! Starting cycle {cycle_id}: spot {spot}, expiry {expiry}, strike {opt.strike} -- {opt.id}.")
+
+        req = SimpleNamespace(
+            sym_id=opt.id, side="buy", qty=leg_qty[leg_direction], lot_size=opt.lot,
+            strategy_name=None, label=f"{cfg['name']} {leg_direction}",
+            stream_symbol=f"{opt.exc_token}_NFO",
+            entry_type="market", entry_validity="day",
+            entry_limit_price=None, entry_trig_price=None,
+            exit_mode="both",
+        )
+        leg_strategy = {
+            "product": cfg["product"], "tick_size": opt.tick or 0.05,
+            "stop": cfg["stop"], "target": cfg["target"], "time_exit": cfg["time_exit"],
+            "trail_check_interval_seconds": cfg.get("trail_check_interval_seconds", 0),
+            "exit_confirmation_windows": cfg.get("exit_confirmation_windows", 1),
+            "stop_breach_force_close_count": cfg.get("stop_breach_force_close_count", 0),
+        }
+        try:
+            order = await om.create_and_place_order_with_strategy(
+                req, leg_strategy,
+                program_tag={"program_id": cfg["program_id"], "cycle_id": cycle_id, "leg": leg_direction},
+            )
+            if order["status"] == "entry_rejected":
+                self._log(program, f"{leg_direction} leg REJECTED by broker.")
+        except Exception as e:
+            self._log(program, f"Failed to place {leg_direction} leg: {e}")
+            return
+
+        program["runtime"]["active_cycle_id"] = cycle_id
+        program["runtime"]["active_cycle_started_at"] = now_iso()
+        program["active_cycle_snapshot"] = {
+            "program_config": copy.deepcopy(cfg),
+            "spot": spot,
+            "expiry": str(expiry),
+            "ce_id": ce.id, "pe_id": pe.id,
+            "ce_strike": ce.strike, "pe_strike": pe.strike,
+            "leg_qty": leg_qty,
+            "widen_offset": 0,
+            "manual_entry_leg": leg_direction, # Reusing manual_entry_leg so it knows it's a 1-leg cycle
+        }
+        store.save_program(program)
+
