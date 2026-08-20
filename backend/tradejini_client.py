@@ -179,6 +179,13 @@ class TradejiniClient:
         resp.raise_for_status()
         return resp.text
 
+    async def get_interval_chart_data(self, symbol_id: str, interval: str, from_ts: int, to_ts: int) -> list:
+        """GET /api/mkt-data/chart/interval-data -- fetches historical chart data."""
+        payload = await self._request("GET", "/api/mkt-data/chart/interval-data", params={
+            "id": symbol_id, "interval": interval, "from": from_ts, "to": to_ts
+        })
+        return payload.get("d") or []
+
     async def close(self):
         await self._http.aclose()
 

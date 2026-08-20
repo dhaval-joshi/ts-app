@@ -349,6 +349,128 @@ class ProgramManager:
         self._log(program, f"Stopped and flattened by user.{' Close requested on open leg(s).' if closed_any else ' No open legs to close.'}")
         return program
 
+    async def start_manual_single_leg_cycle(self, program_id: str, leg: str, indicators=None) -> dict:
+        program = self._require(program_id)
+        cfg = program["config"]
+        if cfg.get("entry_mode") != "manual_single_leg":
+            raise ValueError("Program is not in manual_single_leg mode")
+            
+        rt = program["runtime"]
+        if rt.get("active_cycle_id"):
+            raise ValueError("A cycle is already active")
+            
+        if program.get("archived"):
+            raise ValueError("Program is archived")
+
+        if rt["status"] != sg.RUNNING:
+            raise ValueError(f"Program is halted ({rt['status']}). Please resume it first before entering manually.")
+
+        now = clock.now()
+        om = self._order_manager_for(cfg)
+
+        index_row = self.script_master.get_index(cfg["index_id"])
+        if not index_row:
+            raise ValueError(f"Index {cfg['index_id']} not found in script master")
+
+        index_stream_symbol = f"{index_row.exc_token}_NSE"
+        spot = await om.fetch_live_price(index_stream_symbol, timeout=8.0)
+        if spot is None:
+            raise ValueError(f"No live price for {index_row.disp_name} within timeout. Is market open?")
+
+        expiry = self.script_master.next_expiry(
+            cfg["index_id"], min_working_days=cfg["min_working_days_to_expiry"],
+            holidays=self._holidays, today=now.date(),
+        )
+        if not expiry:
+            raise ValueError("No valid expiry found in script master")
+
+        atm_pair = self.script_master.atm_pair(cfg["index_id"], expiry, spot)
+        if not atm_pair:
+            raise ValueError(f"No ATM strike pair found near {spot}")
+
+        atm_ce, atm_pe = atm_pair
+        opt = atm_ce if leg == "CE" else atm_pe
+        
+        # Size for FULL capital (x2)
+        leg_qty = {}
+        if cfg.get("sizing_mode") == "capital":
+            capital = (cfg.get("capital_per_leg") or 0) * 2
+            leg_stream_symbol = f"{opt.exc_token}_NFO"
+            leg_price = await om.fetch_live_price(leg_stream_symbol, timeout=5.0)
+            if leg_price is None:
+                raise ValueError(f"No live price for {leg} leg ({opt.id}) to size by capital")
+            effective_price = leg_price + CAPITAL_SIZING_SLIPPAGE_POINTS
+            lots = int(capital / effective_price) // opt.lot if effective_price > 0 else 0
+            if lots < 1:
+                raise ValueError(f"Capital {capital} too small for 1 lot at {effective_price}")
+            leg_qty[leg] = lots * opt.lot
+        else:
+            leg_qty[leg] = opt.lot * cfg["lots_per_leg"] * 2
+
+        # Check margin
+        is_live = hasattr(om.client, "get_basket_margin")
+        if is_live:
+            basket = [
+                {"symId": opt.id, "qty": leg_qty[leg], "side": "buy", "type": "market", "product": cfg["product"]},
+            ]
+            try:
+                margin_resp = await om.client.get_basket_margin(basket)
+                margin_data = margin_resp.get("d") or {}
+                available = margin_data.get("availableMargin")
+                required = margin_data.get("requiredMargin")
+                if available is not None and required is not None:
+                    buffered_required = required * MARGIN_SAFETY_BUFFER
+                    if available < buffered_required:
+                        raise ValueError(f"Insufficient margin (have {available:.2f}, need {buffered_required:.2f})")
+            except Exception as e:
+                log.warning(f"Margin check failed during manual entry: {e}")
+
+        cycle_id = uuid.uuid4().hex[:12]
+        self._log(program, f"Manual Entry: Starting cycle {cycle_id} on {leg} leg at ATM strike {opt.strike} (full capital usage).")
+        
+        req = SimpleNamespace(
+            sym_id=opt.id, side="buy", qty=leg_qty[leg], lot_size=opt.lot,
+            strategy_name=None, label=f"{cfg['name']} {leg}",
+            stream_symbol=f"{opt.exc_token}_NFO",
+            entry_type="market", entry_validity="day",
+            entry_limit_price=None, entry_trig_price=None,
+            exit_mode="both",
+        )
+        leg_strategy = {
+            "product": cfg["product"], "tick_size": opt.tick or 0.05,
+            "stop": cfg["stop"], "target": cfg["target"], "time_exit": cfg["time_exit"],
+            "trail_check_interval_seconds": cfg.get("trail_check_interval_seconds", 0),
+            "exit_confirmation_windows": cfg.get("exit_confirmation_windows", 1),
+            "stop_breach_force_close_count": cfg.get("stop_breach_force_close_count", 0),
+        }
+        
+        try:
+            order = await om.create_and_place_order_with_strategy(
+                req, leg_strategy,
+                program_tag={"program_id": cfg["program_id"], "cycle_id": cycle_id, "leg": leg},
+            )
+            if order["status"] == "entry_rejected":
+                self._log(program, f"{leg} manual leg REJECTED by broker: {opt.id}")
+                raise ValueError("Order rejected by broker")
+        except Exception as e:
+            log.exception(f"Failed to place manual leg for {cfg['name']}")
+            raise ValueError(f"Failed to place manual leg: {e}")
+
+        program["runtime"]["active_cycle_id"] = cycle_id
+        program["runtime"]["active_cycle_started_at"] = now_iso()
+        program["active_cycle_snapshot"] = {
+            "program_config": copy.deepcopy(cfg),
+            "spot": spot,
+            "expiry": str(expiry),
+            f"{leg.lower()}_id": opt.id,
+            f"{leg.lower()}_strike": opt.strike,
+            "leg_qty": leg_qty,
+            "widen_offset": 0,
+            "manual_entry_leg": leg,
+        }
+        store.save_program(program)
+        return program
+
     async def close_cycle(self, program_id: str) -> dict:
         """Closes the CURRENT cycle's open leg(s) at market and lets the
         Program continue running otherwise -- the explicit action for
@@ -537,7 +659,9 @@ class ProgramManager:
             om = self._order_manager_for(cfg)
             legs = om.get_orders_by_cycle(rt["active_cycle_id"])
             terminal = ("closed", "cancelled", "entry_rejected")
-            if len(legs) == 2 and all(o["status"] in terminal for o in legs):
+            # For auto_pair it's 2 legs, for manual_single_leg it's 1 leg.
+            expected_legs = 1 if program.get("active_cycle_snapshot", {}).get("manual_entry_leg") else 2
+            if legs and len(legs) >= expected_legs and all(o["status"] in terminal for o in legs):
                 self._close_cycle(program, legs, now)
                 return
             # Mark-to-market cap (opt-in, SafeguardsConfig.mtm_aware): every safeguard below this point
@@ -568,6 +692,9 @@ class ProgramManager:
         if program.get("archived"):
             return  # never starts a new cycle while archived, regardless of status -- but an
                      # already-open cycle (handled above) still gets tracked/closed normally
+
+        if cfg.get("entry_mode") == "manual_single_leg":
+            return  # manual entry programs never auto-start cycles via tick -- they rely exclusively on start_manual_single_leg_cycle
 
         schedule = cfg.get("schedule", {})
         expiry_dates = set(self.script_master.available_expiries(cfg["index_id"])) if schedule.get("days") == "expiry_day" else set()

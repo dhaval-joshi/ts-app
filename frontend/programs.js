@@ -80,6 +80,30 @@ function renderProgramsTab(allOrders) {
     ? active.map((p) => programCardHtml(p, allOrders)).join("")
     : `<div class="text-center text-slate-400 py-12">No Programs yet -- click "New Program" to set one up.</div>`;
   updateProgramBulkBar();
+  fetchProgramIndicators(active);
+}
+
+async function fetchProgramIndicators(programsList) {
+  for (const p of programsList) {
+    if (p.config.entry_mode === "manual_single_leg" && !p.archived) {
+      try {
+        const ind = await api(`/api/programs/${p.config.program_id}/indicators`);
+        const el = document.getElementById(`indicators-${p.config.program_id}`);
+        if (el) {
+          el.innerHTML = `
+            <div class="flex gap-4">
+              <div>RSI(14): <span class="font-medium">${ind.rsi_14 !== null ? ind.rsi_14 : '--'}</span></div>
+              <div>EMA(20): <span class="font-medium">${ind.ema_20 !== null ? ind.ema_20 : '--'}</span></div>
+              <div>EMA(50): <span class="font-medium">${ind.ema_50 !== null ? ind.ema_50 : '--'}</span></div>
+              <div>Trend: <span class="font-medium ${ind.trend === 'Bullish' ? 'text-green-600' : ind.trend === 'Bearish' ? 'text-red-600' : 'text-slate-600'}">${ind.trend}</span></div>
+            </div>
+          `;
+        }
+      } catch (e) {
+        console.warn("Failed to fetch indicators for", p.config.program_id, e);
+      }
+    }
+  }
 }
 
 function renderRiskGroupsTab() {
@@ -237,6 +261,20 @@ function programCardHtml(program, allOrders, opts = {}) {
 
     ${activeLegsHtml}
 
+    ${cfg.entry_mode === "manual_single_leg" && !opts.archived ? `
+    <div class="mt-4 pt-4 border-t border-slate-200">
+      <div class="text-[11px] uppercase tracking-wide text-slate-400 mb-2 flex items-center justify-between">
+        <span>Manual Entry (Single Leg)</span>
+      </div>
+      <div id="indicators-${cfg.program_id}" class="text-xs text-slate-500 mb-3 h-4 flex items-center">
+        <span class="text-slate-300 italic">Loading indicators...</span>
+      </div>
+      <div class="flex gap-2">
+        <button type="button" onclick="startManualLeg('${cfg.program_id}', 'CE')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-green-300 bg-green-50 text-green-700 shadow-sm hover:bg-green-100" ${rt.active_cycle_id || isHalted || isStopped ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>Enter CE</button>
+        <button type="button" onclick="startManualLeg('${cfg.program_id}', 'PE')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-red-300 bg-red-50 text-red-700 shadow-sm hover:bg-red-100" ${rt.active_cycle_id || isHalted || isStopped ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>Enter PE</button>
+      </div>
+    </div>` : ""}
+
     <div class="mt-4 pt-4 border-t border-slate-200 flex flex-wrap items-center gap-2">
       ${opts.archived
         ? `<button type="button" onclick="unarchiveProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-bg-600 text-white shadow-sm"><span class="material-symbols-outlined !text-base">unarchive</span>Unarchive</button>`
@@ -285,6 +323,17 @@ async function resumeProgram(id) {
     loadAdvancedOms();
   } catch (e) {
     toast("Failed to resume: " + e.message, "error");
+  }
+}
+
+async function startManualLeg(id, leg) {
+  if (!confirm(`Are you sure you want to enter a ${leg} leg manually? This will utilize the full allocated capital/lots for this program.`)) return;
+  try {
+    await api(`/api/programs/${id}/manual-entry`, { method: "POST", body: JSON.stringify({ leg }) });
+    toast(`Manual ${leg} entry started.`);
+    loadAdvancedOms();
+  } catch (e) {
+    toast(`Failed to enter ${leg}: ` + e.message, "error");
   }
 }
 
@@ -408,7 +457,7 @@ function readTrailIntervalFromForm(fd) {
 
 function programFormHtml(p) {
   const cfg = p ? p.config : {
-    name: "", index_id: "", risk_group_id: null, product: "intraday", mode: "live", broker_id: "tradejini",
+    name: "", index_id: "", risk_group_id: null, product: "intraday", mode: "live", broker_id: "tradejini", entry_mode: "auto_pair",
     min_working_days_to_expiry: 2, lots_per_leg: 1, sizing_mode: "lots", capital_per_leg: null,
     stop: { offset_mode: "percent", trig_offset: 20, limit_offset: 0, trailing: { enabled: true, trail_by: 5, activation_offset: 0 } },
     target: { offset_mode: "percent", trig_offset: 40, limit_offset: 0, trailing: { enabled: true, trail_by: 10, activation_offset: 0 } },
@@ -458,6 +507,12 @@ function programFormHtml(p) {
         <div><label class="field-label">Broker</label>
           <select name="broker_id" class="js-enhance-select field-input">
             <option value="tradejini" ${!cfg.broker_id || cfg.broker_id === "tradejini" ? "selected" : ""}>Tradejini</option>
+          </select>
+        </div>
+        <div><label class="field-label">Entry Mode</label>
+          <select name="entry_mode" class="js-enhance-select field-input">
+            <option value="auto_pair" ${!cfg.entry_mode || cfg.entry_mode === "auto_pair" ? "selected" : ""}>Auto-Pair (Straddle/Strangle)</option>
+            <option value="manual_single_leg" ${cfg.entry_mode === "manual_single_leg" ? "selected" : ""}>Manual Single-Leg</option>
           </select>
         </div>
         <div><label class="field-label">Min working days to expiry</label><input name="min_working_days_to_expiry" type="number" min="0" step="1" value="${cfg.min_working_days_to_expiry}" class="field-input" /></div>
@@ -677,6 +732,7 @@ async function submitProgramForm() {
     product: fd.get("product"),
     mode: fd.get("mode") || "live",
     broker_id: fd.get("broker_id") || "tradejini",
+    entry_mode: fd.get("entry_mode") || "auto_pair",
     lots_per_leg: num(fd.get("lots_per_leg")) || 1,
     sizing_mode: fd.get("sizing_mode") || "lots",
     capital_per_leg: num(fd.get("capital_per_leg")),

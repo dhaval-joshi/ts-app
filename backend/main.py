@@ -22,6 +22,7 @@ from .nxtradstream import GREEKS
 from .order_manager import OrderManager
 from .script_master import ScriptMaster
 from .program_manager import ProgramManager
+from .indicators import IndicatorService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("tradejini.main")
@@ -32,6 +33,7 @@ paper_manager: OrderManager | None = None
 stream: StreamManager | None = None
 script_master: ScriptMaster | None = None
 programs: ProgramManager | None = None
+indicators: IndicatorService | None = None
 _ws_clients: set[WebSocket] = set()
 
 SCRIP_MASTER_REFRESH_INTERVAL_SECONDS = 6 * 3600  # Tradejini's own data only changes once/day (BOD process);
@@ -46,7 +48,7 @@ _heartbeat_state: dict = {"zone": heartbeat.GREEN, "internet_up": True, "entitie
 
 @asynccontextmanager
 async def lifespan(app):
-    global manager, paper_manager, stream, script_master, programs
+    global manager, paper_manager, stream, script_master, programs, indicators
 
     # Deliberately the ONE thing in this app that's allowed to refuse to
     # start at all -- unlike the Tradejini connection below (transient,
@@ -68,6 +70,7 @@ async def lifespan(app):
     paper_manager = OrderManager(paper_client, stream, subscribe_all_active=True, owner="paper")
     paper_client.order_manager = paper_manager  # resolves the circular reference -- see PaperBrokerClient.__init__
     script_master = ScriptMaster(client)
+    indicators = IndicatorService(client)
     programs = ProgramManager(manager, paper_manager, script_master)
 
     await manager.load_from_disk()
@@ -205,6 +208,8 @@ async def _stream_consumer_loop():
                 await manager.handle_greeks_tick(data)
                 await paper_manager.handle_greeks_tick(data)
             elif "ltp" in data:
+                if indicators:
+                    indicators.handle_l1_tick(data)
                 await manager.handle_l1_tick(data)
                 await paper_manager.handle_l1_tick(data)  # paper fills are driven entirely by ticks (no
                                                              # real broker event to nudge on) -- this keeps
@@ -587,6 +592,62 @@ async def api_unarchive_program(request):
     return JSONResponse(program)
 
 
+async def api_manual_entry(request):
+    try:
+        body = await request.json()
+        leg = (body or {}).get("leg")
+        if leg not in ("CE", "PE"):
+            return JSONResponse({"detail": "leg must be 'CE' or 'PE'"}, status_code=400)
+            
+        program = await programs.start_manual_single_leg_cycle(
+            request.path_params["program_id"], 
+            leg=leg,
+            indicators=indicators
+        )
+    except ValueError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    except Exception as e:
+        log.exception("manual entry failed")
+        return JSONResponse({"detail": str(e)}, status_code=500)
+    return JSONResponse(program)
+
+
+async def api_program_indicators(request):
+    program = programs.get_program(request.path_params["program_id"])
+    if not program:
+        return JSONResponse({"detail": "Program not found"}, status_code=404)
+        
+    cfg = program["config"]
+    index_row = script_master.get_index(cfg["index_id"]) if script_master else None
+    if not index_row:
+        return JSONResponse({"detail": "Index not loaded"}, status_code=400)
+        
+    # Use the index ID (e.g., IDX_-1_NSE) for historical charts
+    symbol_id = index_row.id
+    
+    # Bootstrap if not done (fire and forget or wait? wait to return actual values)
+    if indicators:
+        await indicators.bootstrap_symbol(symbol_id)
+        
+        rsi = indicators.get_rsi(symbol_id, 14)
+        ema_20 = indicators.get_ema(symbol_id, 20)
+        ema_50 = indicators.get_ema(symbol_id, 50)
+        
+        # Calculate trend based on EMA cross
+        trend = "Neutral"
+        if ema_20 and ema_50:
+            trend = "Bullish" if ema_20 > ema_50 else "Bearish"
+            
+        return JSONResponse({
+            "rsi_14": round(rsi, 2) if rsi is not None else None,
+            "ema_20": round(ema_20, 2) if ema_20 is not None else None,
+            "ema_50": round(ema_50, 2) if ema_50 is not None else None,
+            "trend": trend
+        })
+        
+    return JSONResponse({"detail": "Indicators not available"}, status_code=503)
+
+
 # ---------------------------------------------------------------- risk groups --
 
 async def api_list_risk_groups(request):
@@ -788,6 +849,8 @@ routes = [
     Route("/api/programs/{program_id}/close-cycle", api_close_cycle, methods=["POST"]),
     Route("/api/programs/{program_id}/archive", api_archive_program, methods=["POST"]),
     Route("/api/programs/{program_id}/unarchive", api_unarchive_program, methods=["POST"]),
+    Route("/api/programs/{program_id}/manual-entry", api_manual_entry, methods=["POST"]),
+    Route("/api/programs/{program_id}/indicators", api_program_indicators, methods=["GET"]),
     Route("/api/risk-groups", api_list_risk_groups, methods=["GET"]),
     Route("/api/risk-groups", api_create_risk_group, methods=["POST"]),
     Route("/api/risk-groups/{risk_group_id}", api_update_risk_group, methods=["PUT"]),

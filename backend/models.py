@@ -410,6 +410,7 @@ class ProgramConfig:
                                               # anything yet; no Super Program entity exists. Every Program
                                               # created today gets None and stays a fully independent
                                               # Program in every respect.
+    entry_mode: str = "auto_pair"             # "auto_pair" | "manual_single_leg"
     min_working_days_to_expiry: int = 2
     lots_per_leg: int = 1     # used when sizing_mode == "lots" (both legs always equal)
     sizing_mode: str = "lots"  # "lots" | "capital"
@@ -481,6 +482,9 @@ class ProgramConfig:
         mode = d.get("mode") or "live"
         if mode not in ("live", "paper"):
             raise ValidationError('mode must be "live" or "paper"')
+        entry_mode = d.get("entry_mode") or "auto_pair"
+        if entry_mode not in ("auto_pair", "manual_single_leg"):
+            raise ValidationError('entry_mode must be "auto_pair" or "manual_single_leg"')
         broker_id = (d.get("broker_id") or "tradejini").strip()
         super_program_id = d.get("super_program_id") or None
         sizing_mode = d.get("sizing_mode") or "lots"
@@ -510,6 +514,7 @@ class ProgramConfig:
             risk_group_id=d.get("risk_group_id") or None,
             product=product,
             mode=mode,
+            entry_mode=entry_mode,
             broker_id=broker_id,
             super_program_id=super_program_id,
             min_working_days_to_expiry=min_wd,
