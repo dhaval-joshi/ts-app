@@ -624,40 +624,6 @@ async def api_manual_entry(request):
     return JSONResponse(program)
 
 
-async def api_program_indicators(request):
-    program = programs.get_program(request.path_params["program_id"])
-    if not program:
-        return JSONResponse({"detail": "Program not found"}, status_code=404)
-        
-    cfg = program["config"]
-    index_row = script_master.get_index(cfg["index_id"]) if script_master else None
-    if not index_row:
-        return JSONResponse({"detail": "Index not loaded"}, status_code=400)
-        
-    # Use the index ID (e.g., IDX_-1_NSE) for historical charts
-    symbol_id = index_row.id
-    
-    # Bootstrap if not done (fire and forget or wait? wait to return actual values)
-    if indicators:
-        await indicators.bootstrap_symbol(symbol_id)
-        
-        rsi = indicators.get_rsi(symbol_id, 14)
-        ema_20 = indicators.get_ema(symbol_id, 20)
-        ema_50 = indicators.get_ema(symbol_id, 50)
-        
-        # Calculate trend based on EMA cross
-        trend = "Neutral"
-        if ema_20 and ema_50:
-            trend = "Bullish" if ema_20 > ema_50 else "Bearish"
-            
-        return JSONResponse({
-            "rsi_14": round(rsi, 2) if rsi is not None else None,
-            "ema_20": round(ema_20, 2) if ema_20 is not None else None,
-            "ema_50": round(ema_50, 2) if ema_50 is not None else None,
-            "trend": trend
-        })
-        
-    return JSONResponse({"detail": "Indicators not available"}, status_code=503)
 
 
 # ---------------------------------------------------------------- risk groups --
@@ -862,7 +828,7 @@ routes = [
     Route("/api/programs/{program_id}/archive", api_archive_program, methods=["POST"]),
     Route("/api/programs/{program_id}/unarchive", api_unarchive_program, methods=["POST"]),
     Route("/api/programs/{program_id}/manual-entry", api_manual_entry, methods=["POST"]),
-    Route("/api/programs/{program_id}/indicators", api_program_indicators, methods=["GET"]),
+
     Route("/api/risk-groups", api_list_risk_groups, methods=["GET"]),
     Route("/api/risk-groups", api_create_risk_group, methods=["POST"]),
     Route("/api/risk-groups/{risk_group_id}", api_update_risk_group, methods=["PUT"]),

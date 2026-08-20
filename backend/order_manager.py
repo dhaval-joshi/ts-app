@@ -122,6 +122,19 @@ class OrderManager:
                                                              # receives a tick for -- see main.py's wiring
         self._orders: dict[str, dict] = {}          # order_id -> state
         self._archived_orders: dict[str, dict] = {}  # order_id -> state (moved out of the active dashboard)
+        self._trail_state: dict[str, dict] = {}  # order_id -> in-memory-only state for timeframe-aggregated
+                                                       # trailing/exit checks (trail_check_interval_seconds)
+                                                       # and exit confirmation (exit_confirmation_windows) --
+                                                       # {"window_start": monotonic float | None,
+                                                       #  "window_ticks": [float, ...],
+                                                       #  "stop_confirm_streak": int, "target_confirm_streak": int}.
+                                                       # Deliberately NOT persisted (same reasoning as
+                                                       # _latest_prices -- this is display/decision-cadence
+                                                       # state, not something that needs to survive a restart;
+                                                       # losing it mid-window just means the next window starts
+                                                       # fresh, which is harmless). See handle_l1_tick and
+                                                       # _maybe_app_market_exit.
+        self._symbol_momentum: dict[str, dict] = {} # stream_symbol -> {"window": [], "last_update": 0, "state": "Steady", "prev": None}
         self._reconcile_event = asyncio.Event()
         self._lock = asyncio.Lock()
         # on-demand "fetch current price" support (New Order page) -- these
@@ -143,18 +156,6 @@ class OrderManager:
                                                        # this the task could be garbage-collected mid-flight,
                                                        # silently abandoning a close the order was already
                                                        # committed to (status already flipped to "closing")
-        self._trail_state: dict[str, dict] = {}  # order_id -> in-memory-only state for timeframe-aggregated
-                                                       # trailing/exit checks (trail_check_interval_seconds)
-                                                       # and exit confirmation (exit_confirmation_windows) --
-                                                       # {"window_start": monotonic float | None,
-                                                       #  "window_ticks": [float, ...],
-                                                       #  "stop_confirm_streak": int, "target_confirm_streak": int}.
-                                                       # Deliberately NOT persisted (same reasoning as
-                                                       # _latest_prices -- this is display/decision-cadence
-                                                       # state, not something that needs to survive a restart;
-                                                       # losing it mid-window just means the next window starts
-                                                       # fresh, which is harmless). See handle_l1_tick and
-                                                       # _maybe_app_market_exit.
 
     # ------------------------------------------------------------ boot ---
 
@@ -529,6 +530,11 @@ class OrderManager:
                                                    # for the paper-dedicated instance, whose freshly-created
                                                    # pending entry needs its stream_symbol subscribed
                                                    # immediately so PaperBrokerClient can start seeing ticks
+
+        # Fire off backfill for the symbol if we don't have it already
+        if req.stream_symbol and req.sym_id:
+            asyncio.create_task(self._backfill_symbol_momentum(req.stream_symbol, req.sym_id))
+            
         return order
 
     async def request_close(self, order_id: str, reason: str = "manual", price: float | None = None) -> dict:
@@ -746,6 +752,80 @@ class OrderManager:
                           f"the trigger is crossed.")
         store.save_order(order)
 
+    async def _backfill_symbol_momentum(self, stream_symbol: str, sym_id: str):
+        state = self._symbol_momentum.setdefault(stream_symbol, {"window": [], "last_update": 0, "state": "Steady", "prev": None})
+        if state["window"]: 
+            return # Already backfilled or has live data
+            
+        try:
+            # Import real client dynamically for potential cross-module circularity
+            from .main import client as real_client
+            api_client = self.client if hasattr(self.client, "get_interval_chart_data") else real_client
+            
+            is_option = len(sym_id.split('_')) >= 3 and sym_id.split('_')[1] in ("OPTIDX", "OPTSTK")
+            window_minutes = 9 if is_option else 5
+            
+            to_ts = int(time.time())
+            from_ts = to_ts - (window_minutes * 60 * 5) # fetch a bit extra
+            
+            resp = await api_client.get_interval_chart_data(sym_id, "1", from_ts, to_ts)
+            bars = resp.get("bars", []) if isinstance(resp, dict) else resp
+            if not bars and isinstance(resp, dict):
+                bars = resp.get("chartData", [])
+                
+            closes = []
+            for row in bars:
+                if isinstance(row, list) and len(row) >= 5:
+                    closes.append(float(row[4]))
+                elif isinstance(row, dict) and "close" in row:
+                    closes.append(float(row["close"]))
+                    
+            if closes and not state["window"]:
+                state["window"] = closes[-window_minutes:]
+        except Exception as e:
+            log.warning("Failed to backfill momentum history for %s: %s", stream_symbol, e)
+
+    def _update_symbol_momentum(self, symbol: str, ltp: float):
+        state = self._symbol_momentum.setdefault(symbol, {"window": [], "last_update": 0, "state": "Steady", "prev": None})
+        window = state["window"]
+        
+        # throttle momentum updates to ~1 per second max
+        now = time.monotonic()
+        if now - state["last_update"] < 1.0:
+            return
+        state["last_update"] = now
+        
+        is_option = "CE_" in symbol.upper() or "PE_" in symbol.upper()
+        max_len = 9 if is_option else 5
+        
+        window.append(ltp)
+        if len(window) > max_len:
+            window.pop(0)
+            
+        if len(window) > 1:
+            n = len(window)
+            x_mean = (n - 1) / 2.0
+            y_mean = sum(window) / n
+            numerator = sum((i - x_mean) * (window[i] - y_mean) for i in range(n))
+            denominator = sum((i - x_mean)**2 for i in range(n))
+            slope = numerator / denominator if denominator != 0 else 0
+            
+            is_positive = ltp >= y_mean
+            if is_positive and slope > 0:
+                new_state = "Dark Green"
+            elif is_positive and slope <= 0:
+                new_state = "Light Green"
+            elif not is_positive and slope > 0:
+                new_state = "Amber"
+            elif not is_positive and slope <= 0:
+                new_state = "Red"
+            else:
+                new_state = "Steady"
+                
+            if state["state"] != new_state:
+                state["prev"] = state["state"]
+                state["state"] = new_state
+
     def _reconcile_square_off(self, order: dict, by_id: dict) -> bool:
         bo = by_id.get(order["square_off"]["broker_order_id"])
         if bo and bo.get("status") == "completed":
@@ -885,11 +965,17 @@ class OrderManager:
                     # fetch_market_snapshot returns it whole (OI, session O/H/L, vwap, etc.)
                     future.set_result(dict(data))
 
+        self._update_symbol_momentum(symbol, ltp)
+
         for order in self._orders.values():
             if order["status"] != "watching" or order.get("stream_symbol") != symbol:
                 continue
+                
+            m = self._symbol_momentum.get(symbol, {})
+            order["momentum_state"] = m.get("state", "Steady")
+            order["momentum_prev"] = m.get("prev")
+            
             self._update_live_pnl(order, ltp, ltt)  # unconditional, every raw tick -- display accuracy is a
-                                                  # separate concern from trailing/exit DECISION cadence below
 
             interval = order.get("trail_check_interval_seconds") or 0
             if interval <= 0:
@@ -917,6 +1003,8 @@ class OrderManager:
             if run_eval:
                 if order["stop"]["trailing"]["enabled"] or order["target"]["trailing"]["enabled"]:
                     await self._maybe_trail(order, eval_price)
+                
+                # check global safeguards BEFORE evaluating standard stop/target exits
                 await self._maybe_app_market_exit(order, eval_price)
 
     async def handle_greeks_tick(self, data: dict):

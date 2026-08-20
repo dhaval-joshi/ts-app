@@ -526,12 +526,32 @@ function renderOrderCard(o, opts = {}) {
       ${btnText(`Logs (${o.logs.length})`, `toggleLogs('${o.order_id}')`)}
     </div>`;
 
+  let borderCls = "border-slate-200";
+  let arrowHtml = "";
+  if (o.status === "watching") {
+      if (o.momentum_state === "Dark Green") { borderCls = "border-green-600 border-[2px]"; arrowHtml = `<span class="text-green-600 font-bold ml-1">↑</span>`; }
+      else if (o.momentum_state === "Light Green") { borderCls = "border-green-400 border-[2px]"; arrowHtml = `<span class="text-green-400 font-bold ml-1">↓</span>`; }
+      else if (o.momentum_state === "Amber") { borderCls = "border-amber-500 border-[2px]"; arrowHtml = `<span class="text-amber-500 font-bold ml-1">↑</span>`; }
+      else if (o.momentum_state === "Red") { borderCls = "border-red-600 border-[2px]"; arrowHtml = `<span class="text-red-600 font-bold ml-1">↓</span>`; }
+      else if (o.momentum_state === "Steady") { borderCls = "border-slate-300 border-[2px]"; arrowHtml = `<span class="text-slate-400 font-bold ml-1">-</span>`; }
+  }
+  
+  let prevDotHtml = "";
+  if (o.status === "watching" && o.momentum_prev) {
+      let dotColor = "bg-slate-300";
+      if (o.momentum_prev === "Dark Green") dotColor = "bg-green-600";
+      else if (o.momentum_prev === "Light Green") dotColor = "bg-green-400";
+      else if (o.momentum_prev === "Amber") dotColor = "bg-amber-500";
+      else if (o.momentum_prev === "Red") dotColor = "bg-red-600";
+      prevDotHtml = `<div class="w-2 h-2 rounded-full ${dotColor} inline-block mr-2 opacity-75" title="Previous state: ${o.momentum_prev}"></div>`;
+  }
+
   return `
-  <div class="relative bg-white border border-slate-200 rounded-xl shadow-sm p-5 pb-12 ${opts.showCheckbox && isTerminal ? "pl-11" : ""}" data-id="${o.order_id}">
+  <div class="relative bg-white border ${borderCls} rounded-xl shadow-sm p-5 pb-12 transition-colors duration-300 ${opts.showCheckbox && isTerminal ? "pl-11" : ""}" data-id="${o.order_id}">
     ${opts.showCheckbox && isTerminal ? `<input type="checkbox" class="order-card-checkbox absolute top-5 left-5 w-4 h-4" data-order-id="${o.order_id}" onchange="onCardCheckboxChange(this)" ${opts.checked ? "checked" : ""} />` : ""}
     <div class="flex items-start justify-between gap-3">
       <div>
-        <div class="text-base font-medium text-slate-900">${o.label} <span class="text-slate-400 font-normal">${o.side.toUpperCase()} ${o.qty}</span></div>
+        <div class="text-base font-medium text-slate-900 flex items-center">${prevDotHtml}${o.label} <span class="text-slate-400 font-normal ml-2">${o.side.toUpperCase()} ${o.qty}</span></div>
         <div class="text-xs text-slate-400 mt-0.5">${o.sym_id} · ${o.product} · strategy: ${o.strategy_name || "—"}</div>
         <div class="text-xs text-slate-400">${timeExit}${trailBits.length ? " · " + trailBits.join(", ") : ""}</div>
         ${exitModeLabel ? `<div class="text-xs text-amber-600">${exitModeLabel}</div>` : ""}
@@ -542,7 +562,7 @@ function renderOrderCard(o, opts = {}) {
     ${warningBannerHtml(o)}
 
     <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-4 mt-4">
-      ${hasLivePrice ? kv("Live price", fmt(o.last_ltp)) : ""}
+      ${hasLivePrice ? kv("Live price", `${fmt(o.last_ltp)}${arrowHtml}`) : ""}
       ${kv("Entry avg", `${fmt(o.entry.avg_price)}${hasEntryAvg ? `<button type="button" title="Copy" onclick="copyEntryPrice(${o.entry.avg_price})" class="relative inline-flex items-center justify-center w-6 h-6 rounded-[0.3rem] text-slate-400 hover:text-blue-600 hover:bg-blue-50"><span class="material-symbols-outlined !text-base">content_copy</span></button>` : ""}`)}
       ${kv("Exit avg", hasExitAvg ? fmt(o.pnl.exit_avg_price) : "—")}
       ${kv("Stop trigger", legDisplay(o.stop))}

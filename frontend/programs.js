@@ -80,30 +80,6 @@ function renderProgramsTab(allOrders) {
     ? active.map((p) => programCardHtml(p, allOrders)).join("")
     : `<div class="text-center text-slate-400 py-12">No Programs yet -- click "New Program" to set one up.</div>`;
   updateProgramBulkBar();
-  fetchProgramIndicators(active);
-}
-
-async function fetchProgramIndicators(programsList) {
-  for (const p of programsList) {
-    if (p.config.entry_mode === "manual_single_leg" && !p.archived) {
-      try {
-        const ind = await api(`/api/programs/${p.config.program_id}/indicators`);
-        const el = document.getElementById(`indicators-${p.config.program_id}`);
-        if (el) {
-          el.innerHTML = `
-            <div class="flex gap-4">
-              <div>RSI(14): <span class="font-medium">${ind.rsi_14 !== null ? ind.rsi_14 : '--'}</span></div>
-              <div>EMA(20): <span class="font-medium">${ind.ema_20 !== null ? ind.ema_20 : '--'}</span></div>
-              <div>EMA(50): <span class="font-medium">${ind.ema_50 !== null ? ind.ema_50 : '--'}</span></div>
-              <div>Trend: <span class="font-medium ${ind.trend === 'Bullish' ? 'text-green-600' : ind.trend === 'Bearish' ? 'text-red-600' : 'text-slate-600'}">${ind.trend}</span></div>
-            </div>
-          `;
-        }
-      } catch (e) {
-        console.warn("Failed to fetch indicators for", p.config.program_id, e);
-      }
-    }
-  }
 }
 
 function renderRiskGroupsTab() {
@@ -161,22 +137,39 @@ function activeLegsInnerHtml(activeLegs) {
           const p = o.pnl && (o.pnl.realized ?? o.pnl.unrealized);
           const isRealized = o.pnl && o.pnl.realized != null;
           const isClosing = o.status === "closing";
-          // "closing" is NOT still live -- ticks stop updating this leg's
-          // unrealized P&L the moment status leaves "watching", so what's
-          // shown is a FROZEN snapshot from the instant the close fired,
-          // not a continuously-updating figure. Labeling it "(live)" here
-          // would be actively misleading about what the number represents.
           const pnlLabel = isRealized ? " (closed)" : isClosing ? " (at trigger, pending confirmation)" : " (live)";
-          // no realized_pct field exists (see order_manager._finalize_realized_pnl) -- percentage
-          // is only ever meaningful pre-close, same as app.js's pnlCellHtml for Regular OMS.
           const pnlPct = !isRealized && o.pnl && typeof o.pnl.unrealized_pct === "number" ? ` (${signed(o.pnl.unrealized_pct)}%)` : "";
           const pnlText = typeof p === "number" ? `${signed(p)}${pnlPct}${pnlLabel}` : "unknown";
           const pnlCls = typeof p === "number" ? pnlColorClass(p) : "text-slate-400";
+          
+          let borderCls = "border-slate-200";
+          let arrowHtml = "";
+          if (o.status === "watching") {
+              if (o.momentum_state === "Dark Green") { borderCls = "border-green-600"; arrowHtml = `<span class="text-green-600 font-bold ml-1">↑</span>`; }
+              else if (o.momentum_state === "Light Green") { borderCls = "border-green-400"; arrowHtml = `<span class="text-green-400 font-bold ml-1">↓</span>`; }
+              else if (o.momentum_state === "Amber") { borderCls = "border-amber-500"; arrowHtml = `<span class="text-amber-500 font-bold ml-1">↑</span>`; }
+              else if (o.momentum_state === "Red") { borderCls = "border-red-600"; arrowHtml = `<span class="text-red-600 font-bold ml-1">↓</span>`; }
+              else if (o.momentum_state === "Steady") { borderCls = "border-slate-300"; arrowHtml = `<span class="text-slate-400 font-bold ml-1">-</span>`; }
+          }
+          
+          let prevDotHtml = "";
+          if (o.status === "watching" && o.momentum_prev) {
+              let dotColor = "bg-slate-300";
+              if (o.momentum_prev === "Dark Green") dotColor = "bg-green-600";
+              else if (o.momentum_prev === "Light Green") dotColor = "bg-green-400";
+              else if (o.momentum_prev === "Amber") dotColor = "bg-amber-500";
+              else if (o.momentum_prev === "Red") dotColor = "bg-red-600";
+              prevDotHtml = `<div class="w-2 h-2 rounded-full ${dotColor} inline-block mr-1 opacity-75" title="Previous state: ${o.momentum_prev}"></div>`;
+          }
+
           return `
-          <div class="border border-slate-200 rounded-[0.3rem] p-2.5">
-            <div class="text-xs font-medium text-slate-900">${o.program_leg} — ${o.sym_id}</div>
+          <div class="border ${borderCls} border-[2px] rounded-[0.3rem] p-2.5 transition-colors duration-300">
+            <div class="text-xs font-medium text-slate-900 flex items-center justify-between">
+                <span>${o.program_leg} — ${o.sym_id}</span>
+                <div class="flex items-center">${prevDotHtml}</div>
+            </div>
             <div class="text-xs text-slate-400">${STATUS_LABEL[o.status] || o.status} · entry ${fmt(o.entry.avg_price)}</div>
-            ${o.status === "watching" && o.last_ltp != null ? `<div class="text-xs text-slate-400">Live price ${fmt(o.last_ltp)}</div>` : ""}
+            ${o.status === "watching" && o.last_ltp != null ? `<div class="text-xs text-slate-400">Live price ${fmt(o.last_ltp)}${arrowHtml}</div>` : ""}
             <div class="text-xs font-medium ${pnlCls} mt-0.5">${pnlText}</div>
             <div class="text-[11px] text-slate-400 mt-1">SL ${fmt(o.stop && o.stop.current_trig_price)} · Target ${fmt(o.target && o.target.current_trig_price)} <span class="text-slate-300">(live, in-memory)</span></div>
             ${o.status === "watching" ? `<button type="button" onclick="closeLeg('${o.order_id}')" class="mt-1.5 text-[11px] text-red-600 hover:underline">Close this leg</button>` : ""}
