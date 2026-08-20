@@ -8,7 +8,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 
 ## Phase 1: Local Foundation & Hybrid Augmentation
 
-### Iteration 1: Robust Core & P&L Guardrails
+### Iteration 1 (Aegis): Robust Core & P&L Guardrails
+*Codename Logic: Aegis represents a shield; the ultimate focus of Iteration 1 is protecting capital via guardrails and preventing disaster.*
 *Focus: Protecting capital and optimizing manual execution speed.*
 - **PO**: Single-view "Cockpit" of risk, global kill switch, and synthetic grouped legs. The trader makes the decisions, but risk management is instantly enforceable.
 - **Arch**: Transition from JSON atomic writes to a local SQLite database for thread-safe state management.
@@ -16,7 +17,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: Real-time IVR (Implied Volatility Rank) and VWAP calculations to drive manual entry alerts.
 - **Profitability Impact (Slippage Reduction & Disaster Prevention)**: During massive volatility spikes (which is when the most profitable opportunities occur), JSON file-locking can cause milliseconds of delay, resulting in severe slippage on entries and exits. Moving to SQLite guarantees instantaneous state management. Furthermore, the Global Kill Switch and synthetic grouped stops ensure that a sudden flash-crash doesn't wipe out a month of algorithmic gains because a manual hedge was left unprotected.
 
-### Iteration 2: The Augmentation Engine
+### Iteration 2 (Valkyrie): The Augmentation Engine
+*Codename Logic: Valkyries guide warriors on the battlefield. Here, the system acts as the ultimate Co-Pilot, guiding the trader to optimal execution.*
 *Focus: System calculates, human approves.*
 - **PO**: Introduction of "Co-pilot" alerts via **Telegram Bot integration**, allowing remote execution. The system detects high-probability setups and calculates optimal sizing based on capital. The trader executes with a single click directly from Telegram without needing to be at the trading station.
 - **Arch**: Decouple the Strategy evaluation loop from the Order Execution loop using local async queues to prevent UI/execution freezing.
@@ -24,7 +26,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: 9:20 AM automated Straddle deployment with automated trailing stops, but manual oversight.
 - **Profitability Impact (Execution Speed & Optimal Sizing)**: In trading, hesitation costs money. Instead of manually calculating how many lots you can afford and second-guessing the entry, the "Co-pilot" calculates the optimal mathematical position size instantly based on your capital. You capture the move the very second the volatility compression alert fires, rather than seconds late.
 
-### Iteration 3: Local Event-Driven Transformation
+### Iteration 3 (Quicksilver): Local Event-Driven Transformation
+*Codename Logic: Quicksilver represents extreme speed and fluidity, mirroring the goal of a zero-latency, lag-free UI during violent market moves.*
 *Focus: Zero latency in the UI and data ingestion.*
 - **PO**: Zero UI lag during violent market moves. Introduction of a DOM (Depth of Market) ladder for manual, lightning-fast scalping.
 - **Arch**: Introduce a local Pub/Sub broker (e.g., Redis). Websocket market data ingestion is completely decoupled from the UI and execution engines.
@@ -36,7 +39,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 
 ## Phase 2: Data Dominance & Autonomous Scaling
 
-### Iteration 4: The Time-Series Backbone
+### Iteration 4 (Chronos): The Time-Series Backbone
+*Codename Logic: Chronos is the personification of time. This iteration introduces the Time-Series DB and historical tick data replay.*
 *Focus: Granular data analysis and historical validation.*
 - **PO**: Introduction of visual strategy backtesting directly in the UI. 
 - **Arch**: Introduce a dedicated Time-Series Database (TSDB) like InfluxDB or QuestDB.
@@ -44,7 +48,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: Automated Momentum strategies (Gap & Go) based on Relative Volume (RVOL) scanners.
 - **Profitability Impact (Historical Validation)**: By locally testing against millions of recorded ticks, you stop paying the "tuition fee" of discovering that a strategy fails in live markets.
 
-### Iteration 5: Autonomous Execution Expansion
+### Iteration 5 (Phalanx): Autonomous Execution Expansion
+*Codename Logic: A Phalanx is a synchronized formation. This iteration scales the system to run 10+ independent algorithms marching together safely.*
 *Focus: Scaling the number of concurrent strategies.*
 - **PO**: Capability to run 10+ independent algos safely. Introduction of strict Capital Allocation dashboards per strategy.
 - **Arch**: Multi-process architecture. Separate isolated execution nodes so a crash in one strategy doesn't take down the platform.
@@ -52,7 +57,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: Delta-neutral dynamic hedging loops running completely autonomously.
 - **Profitability Impact (Scale & Precision)**: You transition from manually selecting strikes (e.g., picking "ATM±3") to deploying ML models that analyze the IV surface to pick the exact strike mathematically proven to decay the fastest. Scaling to 10+ autonomous, uncorrelated strategies drastically improves your Sharpe ratio.
 
-### Iteration 6: Advanced Micro-structure (The Bridge)
+### Iteration 6 (Scalpel): Advanced Micro-structure (The Bridge)
+*Codename Logic: A Scalpel represents surgical precision. This phase dives into tick-level optimization and slicing the bid-ask spread to eliminate slippage.*
 *Focus: Slippage reduction and tick-level optimization.*
 - **PO**: Execution slippage analytics dashboard. The system intelligently suggests limit vs. market orders based on current liquidity.
 - **Arch**: Implement Memory-Mapped Files (mmap) or ZeroMQ for ultra-fast inter-process tick sharing locally.
@@ -64,7 +70,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 
 ## Phase 3: The Cloud Transition
 
-### Iteration 7: Hybrid Cloud - Data Heavy Lifting
+### Iteration 7 (Atlas): Hybrid Cloud - Data Heavy Lifting
+*Codename Logic: Atlas carried the weight of the heavens. Here, the cloud shoulders the massive computational weight of historical ML training.*
 *Focus: Leveraging cloud compute for ML while keeping execution local.*
 - **PO**: Access to massive backtesting infrastructure without burning local laptop resources.
 - **Arch**: Push the local Data Lake to AWS S3 / GCP Cloud Storage.
@@ -72,7 +79,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: Cross-asset statistical arbitrage and correlation strategies (e.g., BankNifty vs. heavyweights).
 - **Profitability Impact (Alpha Diversity)**: Unlocks the computational power required to identify micro-correlations across hundreds of assets simultaneously.
 
-### Iteration 8: Cloud Execution Shadowing
+### Iteration 8 (Phantom): Cloud Execution Shadowing
+*Codename Logic: A Phantom operates unseen. The cloud system executes in pure "shadow mode" to test latency against the local machine.*
 *Focus: Testing the waters of cloud latency.*
 - **PO**: "Shadow Trading" mode. The cloud system runs in paper mode alongside the local live mode to verify latency and execution logic.
 - **Arch**: Kubernetes deployment on AWS/GCP. Upgrading from retail REST/Websockets to institutional FIX API connectivity.
@@ -80,7 +88,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: Automated statistical arbitrage pairs trading.
 - **Profitability Impact (Latency Testing)**: Proving that cloud infrastructure executes faster than the local machine before risking live capital.
 
-### Iteration 9: Full Cloud Transition
+### Iteration 9 (Stratosphere): Full Cloud Transition
+*Codename Logic: The Stratosphere represents breaking away from the ground (the local laptop) and achieving a fully elevated, always-on cloud presence.*
 *Focus: Cutting the cord to the laptop.*
 - **PO**: The trading station is now purely a web portal and a **dedicated Mobile App**. The trader monitors a fully autonomous cloud fleet from anywhere in the world.
 - **Arch**: Complete shutdown of local execution. Distributed microservices architecture for Execution, Risk, and Strategy.
@@ -88,7 +97,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: HFT Market Making (providing liquidity inside the spread).
 - **Profitability Impact (Always-On Autonomy)**: Removes the dependency on local internet, power outages, or laptop constraints. The system earns alpha globally, 24/5.
 
-### Iteration 10: The HFT Powerhouse (The North Star)
+### Iteration 10 (Apex): The HFT Powerhouse (The North Star)
+*Codename Logic: Apex is the absolute peak. This is the ultimate institutional-grade, latency-arbitrage powerhouse at the top of the evolutionary chain.*
 *Focus: Institutional-grade latency and scale.*
 - **PO**: Profitability driven by scale and speed, not just directional bets.
 - **Arch**: FPGA / C++ execution engines for critical paths. Co-location of servers directly at the exchange.
