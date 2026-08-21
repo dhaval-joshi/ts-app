@@ -182,30 +182,28 @@ def iv_session_rank_gate(leg_iv: float | None, leg_lowiv: float | None, leg_high
 
 def evaluate_entry(cfg: dict, *, index_snapshot: dict | None, ce_snapshot: dict | None, pe_snapshot: dict | None,
                     ce_greeks: dict | None, pe_greeks: dict | None, vix_ltp: float | None,
-                    vix_history: list[float], index_history: list[dict]) -> tuple[bool, str | None, bool]:
+                    vix_history: list[float], index_history: list[dict],
+                    execution_mode: str, target_regime: str, active_regime: str) -> tuple[bool, str | None, bool]:
     """The single decision point program_manager calls -- mirrors
     program_safeguards.can_start_new_cycle's shape (one function, every
     check explicit, the reason string is exactly what gets shown to the
     person and logged). Returns (allowed, reason_if_not,
-    greeks_unverifiable) -- the third value lets the caller log the
-    entitlement question distinctly from an ordinary gate rejection,
-    without this module doing any logging itself (stays pure, per the
-    module docstring).
+    greeks_unverifiable).
+    
+    If execution_mode == 'sentinel', we ignore the manual configuration
+    and strictly evaluate based on target_regime vs active_regime.
+    """
+    if execution_mode == "sentinel":
+        if active_regime == "UNKNOWN":
+            return False, "Sentinel is blind (UNKNOWN regime due to data failure) -- safe halting entry.", False
+        if target_regime != "ANY" and active_regime != target_regime:
+            return False, f"Sentinel gate blocked: Market is {active_regime}, but Program targets {target_regime}.", False
+        return True, None, False
 
-    `cfg` is EntrySignalConfig.as_dict() -- every threshold is Optional;
-    a None threshold means that specific gate isn't configured, same
-    "nothing extra happens unless explicitly opted into" convention as
-    every other field in this app. `cfg["enabled"]` is the master switch:
-    False short-circuits everything, today's exact behavior."""
     if not cfg.get("enabled"):
         return True, None, False
 
     iv_gate_configured = cfg.get("max_iv_session_rank_pct") is not None
-    # "unverifiable" specifically means: the IV-rank gate was configured, but NEITHER leg's greeks
-    # arrived at all (OrderManager.fetch_greeks_snapshot timed out on both) -- this is the live signal
-    # for "is this account actually entitled to the Greeks channel," discovered naturally rather than
-    # needing a separate diagnostic step (see the plan). A single leg missing greeks while the other has
-    # them is NOT unverifiable -- that's just one strike's data not arriving yet, ordinary gate logic below.
     greeks_unverifiable = iv_gate_configured and ce_greeks is None and pe_greeks is None
     if greeks_unverifiable and cfg.get("on_greeks_unverifiable", "allow") == "skip":
         return False, ("Greeks/IV data did not arrive in time (Greeks entitlement unconfirmed for this "

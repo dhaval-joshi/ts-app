@@ -25,6 +25,8 @@ from .program_manager import ProgramManager
 from .indicators import IndicatorService
 from .signal_engine import SignalEngine
 
+from .regime_classifier import RegimeClassifier
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("tradejini.main")
 
@@ -36,6 +38,7 @@ script_master: ScriptMaster | None = None
 programs: ProgramManager | None = None
 indicators: IndicatorService | None = None
 signal_engine: SignalEngine | None = None
+regime_classifier: RegimeClassifier | None = None
 _ws_clients: set[WebSocket] = set()
 
 SCRIP_MASTER_REFRESH_INTERVAL_SECONDS = 6 * 3600  # Tradejini's own data only changes once/day (BOD process);

@@ -413,6 +413,10 @@ class ProgramConfig:
                                               # created today gets None and stays a fully independent
                                               # Program in every respect.
     entry_mode: str = "auto_pair"             # "auto_pair" | "manual_single_leg" | "signal_single_leg"
+    execution_mode: str = "manual_config"     # "manual_config" | "sentinel" -- whether to explicitly follow manual 
+                                              # config or surrender entry/exit authority to the Regime Classifier (Iteration 1.1)
+    target_regime: str = "SIDEWAYS"           # "SIDEWAYS" | "DIRECTIONAL" | "VOLATILE" | "ANY" -- what regime this 
+                                              # program is built for (used when execution_mode == "sentinel")
     orb_duration_minutes: int = 15            # ORB tracking window duration in minutes (when entry_mode == "signal_single_leg")
     min_working_days_to_expiry: int = 2
     lots_per_leg: int = 1     # used when sizing_mode == "lots" (both legs always equal)

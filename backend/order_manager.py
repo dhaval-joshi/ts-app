@@ -453,6 +453,9 @@ class OrderManager:
             "program_id": (program_tag or {}).get("program_id"),  # non-None only for an Advanced OMS leg
             "cycle_id": (program_tag or {}).get("cycle_id"),
             "program_leg": (program_tag or {}).get("leg"),         # "CE" | "PE" | None
+            "execution_mode": (program_tag or {}).get("execution_mode", "manual_config"),
+            "target_regime": (program_tag or {}).get("target_regime", "ANY"),
+            "index_id": (program_tag or {}).get("index_id"),
             "trail_check_interval_seconds": strategy.get("trail_check_interval_seconds", 0) or 0,  # copied
                 # from the resolved Strategy (Regular OMS) or the Program's own leg_strategy dict, same
                 # pattern as tick_size/time_exit above -- 0 (absent for a plain Strategy dict, or an
@@ -1072,6 +1075,35 @@ class OrderManager:
         arrives while _do_close is still running -- see _spawn_close's
         docstring for why the close is backgrounded rather than awaited
         directly here."""
+        # Smart Exit (Sentinel): Preemptive regime shifts
+        execution_mode = order.get("execution_mode")
+        target_regime = order.get("target_regime")
+        index_id = order.get("index_id")
+        
+        if execution_mode == "sentinel" and target_regime and index_id:
+            from . import main as main_app
+            if main_app.regime_classifier:
+                reg_data = main_app.regime_classifier.get_current_regime(index_id)
+                current_regime = reg_data.get("state", "UNKNOWN")
+                
+                # Check for blind state or opposing state
+                if current_regime == "UNKNOWN":
+                    self._log(order, "Preemptive Smart Exit: Sentinel is BLIND (data failure). Liquidating to protect capital.")
+                    order["status"] = "closing"
+                    order["close_reason"] = "sentinel_blind"
+                    order["closing_since"] = now_iso()
+                    store.save_order(order)
+                    self._spawn_close(order)
+                    return
+                elif current_regime != target_regime and target_regime != "ANY":
+                    self._log(order, f"Preemptive Smart Exit: Regime shifted from {target_regime} to {current_regime}. Liquidating immediately.")
+                    order["status"] = "closing"
+                    order["close_reason"] = "regime_shift"
+                    order["closing_since"] = now_iso()
+                    store.save_order(order)
+                    self._spawn_close(order)
+                    return
+
         mode = order.get("exit_mode", "both")
         if mode == "none":
             return
@@ -1213,6 +1245,19 @@ class OrderManager:
             return False
 
         trail_by = trailing["trail_by"]
+        
+        # Smart Exits: ATR-based trailing
+        execution_mode = order.get("execution_mode")
+        index_id = order.get("index_id")
+        if execution_mode == "sentinel" and index_id:
+            from . import main as main_app
+            if main_app.regime_classifier:
+                reg_data = main_app.regime_classifier.get_current_regime(index_id)
+                atr = reg_data.get("atr", 0.0)
+                if atr > 0:
+                    # Dynamically widen the stop based on ATR if it's larger than static trail_by
+                    trail_by = max(trail_by, round(atr * 1.5, 2))
+
         offset = leg["trig_limit_offset"]
         tick_size = order.get("tick_size") or DEFAULT_TICK_SIZE
 

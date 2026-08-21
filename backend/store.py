@@ -35,6 +35,7 @@ _get_db().execute("CREATE TABLE IF NOT EXISTS factsheets (id TEXT PRIMARY KEY, t
 _get_db().execute("CREATE TABLE IF NOT EXISTS reconcile_reports (id TEXT PRIMARY KEY, date TEXT, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS signal_history (id TEXT PRIMARY KEY, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS singletons (id TEXT PRIMARY KEY, data TEXT)")
+_get_db().execute("CREATE TABLE IF NOT EXISTS historical_bars (symbol_id TEXT, timestamp INTEGER, open REAL, high REAL, low REAL, close REAL, volume REAL, PRIMARY KEY (symbol_id, timestamp))")
 
 
 # ---------------------------------------------------------------- orders --
@@ -303,3 +304,30 @@ def list_recent_signal_snapshots(days: int = 20) -> list[dict]:
     conn = _get_db()
     rows = conn.execute("SELECT data FROM signal_history ORDER BY id DESC LIMIT ?", (days,)).fetchall()
     return [json.loads(row[0]) for row in rows]
+
+# --------------------------------------------------------- historical bars --
+
+def save_historical_bars(symbol_id: str, bars: list[dict]) -> None:
+    conn = _get_db()
+    cursor = conn.cursor()
+    cursor.execute("BEGIN TRANSACTION")
+    try:
+        for bar in bars:
+            cursor.execute(
+                "INSERT OR REPLACE INTO historical_bars (symbol_id, timestamp, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (symbol_id, bar["timestamp"], bar["open"], bar["high"], bar["low"], bar["close"], bar.get("volume", 0.0))
+            )
+        cursor.execute("COMMIT")
+    except Exception:
+        cursor.execute("ROLLBACK")
+        raise
+
+def load_historical_bars(symbol_id: str) -> list[dict]:
+    conn = _get_db()
+    rows = conn.execute("SELECT timestamp, open, high, low, close, volume FROM historical_bars WHERE symbol_id=? ORDER BY timestamp ASC", (symbol_id,)).fetchall()
+    return [{"timestamp": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]} for r in rows]
+
+def get_latest_historical_bar_timestamp(symbol_id: str) -> int:
+    conn = _get_db()
+    row = conn.execute("SELECT MAX(timestamp) FROM historical_bars WHERE symbol_id=?", (symbol_id,)).fetchone()
+    return row[0] if row and row[0] is not None else 0

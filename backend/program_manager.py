@@ -1058,10 +1058,19 @@ class ProgramManager:
             self._maybe_update_daily_signal_snapshot(now, index_id=cfg["index_id"], index_close=index_price_now,
                                                        vix_ltp=snaps["vix_ltp"])
 
+            from . import main as main_app
+            active_regime = "UNKNOWN"
+            if main_app.regime_classifier:
+                regime_data = main_app.regime_classifier.get_current_regime(cfg["index_id"])
+                active_regime = regime_data.get("state", "UNKNOWN")
+
             allowed, reason, greeks_unverifiable = entry_signals.evaluate_entry(
                 entry_cfg, index_snapshot=snaps["index_snapshot"], ce_snapshot=snaps["ce_snapshot"],
                 pe_snapshot=snaps["pe_snapshot"], ce_greeks=snaps["ce_greeks"], pe_greeks=snaps["pe_greeks"],
                 vix_ltp=snaps["vix_ltp"], vix_history=vix_history, index_history=index_history,
+                execution_mode=cfg.get("execution_mode", "manual_config"),
+                target_regime=cfg.get("target_regime", "ANY"),
+                active_regime=active_regime,
             )
             if greeks_unverifiable:
                 self._maybe_log_greeks_unverifiable(program)
@@ -1151,7 +1160,14 @@ class ProgramManager:
             try:
                 order = await om.create_and_place_order_with_strategy(
                     req, leg_strategy,
-                    program_tag={"program_id": cfg["program_id"], "cycle_id": cycle_id, "leg": leg_name},
+                    program_tag={
+                        "program_id": cfg["program_id"], 
+                        "cycle_id": cycle_id, 
+                        "leg": leg_name,
+                        "execution_mode": cfg.get("execution_mode", "manual_config"),
+                        "target_regime": cfg.get("target_regime", "ANY"),
+                        "index_id": cfg["index_id"]
+                    },
                 )
                 if order["status"] == "entry_rejected":
                     self._log(program, f"{leg_name} leg REJECTED by broker: {opt.id} -- see its own log for the reason.")
