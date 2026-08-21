@@ -830,7 +830,10 @@ async def api_kill_switch(request):
                 await paper_manager.close_order(o["order_id"], reason="Kill Switch triggered")
                 count_ord += 1
                 
-    return JSONResponse({"ok": True, "halted_programs": count_prog, "closing_orders": count_ord})
+    from .notifier import send_telegram_alert
+    await send_telegram_alert(f"🚨 <b>KILL SWITCH ACTIVATED</b> 🚨\n\nHalted {count_prog} programs and closed {count_ord} orders.")
+    
+    return JSONResponse({"halted_programs": count_prog, "closing_orders": count_ord})
 
 
 routes = [

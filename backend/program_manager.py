@@ -609,6 +609,8 @@ class ProgramManager:
                     failure_log.log_failure(category="program_risk_group_halt", order_id=None, program_id=pid,
                                              message=f"Program {program['config']['name']} halted: "
                                                      f"Risk Group '{group['name']}' cap reached")
+                    from .notifier import send_telegram_alert
+                    await send_telegram_alert(f"🚨 <b>RISK GROUP HALT</b> 🚨\nGroup '{group['name']}' hit daily loss cap. Program '{program['config']['name']}' halted.")
 
             # ---- tier 2: Portfolio -- toggleable; halts EVERYTHING if enabled ----
             portfolio_pnl = sum(rt.daily_realized_pnl for rt in runtime_map.values()) + sum(mtm_pnl_map.values())
@@ -636,6 +638,8 @@ class ProgramManager:
                                         f"This Program's own numbers may still be fine. Resume manually once reviewed.")
                     failure_log.log_failure(category="program_portfolio_halt", order_id=None, program_id=pid,
                                              message=f"Program {program['config']['name']} halted: portfolio cap reached")
+                    from .notifier import send_telegram_alert
+                    await send_telegram_alert(f"🚨 <b>PORTFOLIO HALT</b> 🚨\nPortfolio hit daily loss cap. Program '{program['config']['name']}' halted.")
             else:
                 portfolio_cap = float("inf")  # disabled -- never trips the per-cycle check below
 
@@ -695,6 +699,8 @@ class ProgramManager:
                                              program_id=cfg["program_id"],
                                              message=f"Program {cfg['name']}: mark-to-market daily loss cap "
                                                      f"reached (effective_pnl={effective_pnl:.2f})")
+                    from .notifier import send_telegram_alert
+                    await send_telegram_alert(f"🚨 <b>MTM DAILY LOSS HALT</b> 🚨\nProgram '{cfg['name']}' mark-to-market loss reached {effective_pnl:.2f}. Halted.")
             return
 
         if program.get("archived"):
@@ -787,6 +793,16 @@ class ProgramManager:
         )
         program["runtime"] = dataclasses.asdict(state)
         store.save_program(program)
+        
+        if state.status in [sg.HALTED_CONSECUTIVE_LOSS, sg.HALTED_DAILY_LOSS]:
+            import asyncio
+            from .notifier import send_telegram_alert
+            asyncio.create_task(send_telegram_alert(
+                f"🚨 <b>PROGRAM HALTED</b> 🚨\n\n"
+                f"Program: {cfg['name']}\n"
+                f"Reason: {state.status}\n"
+                f"Daily PnL: {state.daily_realized_pnl:.2f}"
+            ))
 
         status_note = ""
         if state.status != sg.RUNNING:

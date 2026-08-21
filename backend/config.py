@@ -23,6 +23,9 @@ APP_LOGIN_PASSWORD = os.getenv("APP_LOGIN_PASSWORD", "")
 SESSION_COOKIE_NAME = "tjstation_session"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
 # Tolerate a common .env mistake: pasting the host WITH a protocol prefix
 # and/or a trailing slash (e.g. "https://api.tradejini.com/"), which would
 # otherwise produce a malformed URL like "https://https://api.tradejini.com"

@@ -990,7 +990,22 @@ class OrderManager:
                 continue
                 
             m = self._symbol_momentum.get(symbol, {})
-            order["momentum_state"] = m.get("state", "Steady")
+            new_state = m.get("state", "Steady")
+            old_state = order.get("momentum_state", "Steady")
+            
+            if old_state != new_state and new_state in ("Dark Green", "Red"):
+                import asyncio
+                from .notifier import send_telegram_alert
+                signal_type = "LONG" if new_state == "Dark Green" else "SHORT"
+                icon = "🟢" if signal_type == "LONG" else "🔴"
+                asyncio.create_task(send_telegram_alert(
+                    f"{icon} <b>{signal_type} ENTRY SIGNAL</b> {icon}\n\n"
+                    f"Symbol: {symbol}\n"
+                    f"Momentum just flipped to {new_state}!\n"
+                    f"Check dashboard for manual entry."
+                ))
+            
+            order["momentum_state"] = new_state
             order["momentum_prev"] = m.get("prev")
             
             self._update_live_pnl(order, ltp, ltt)  # unconditional, every raw tick -- display accuracy is a
