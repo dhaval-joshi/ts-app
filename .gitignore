@@ -9,6 +9,7 @@ AGENTS.override.md
 .env.*
 !.env.example
 secrets/
+__temp/
 *.pem
 *.key
 *.p12

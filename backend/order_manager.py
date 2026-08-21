@@ -782,7 +782,15 @@ class OrderManager:
                     closes.append(float(row["close"]))
                     
             if closes and not state["window"]:
-                state["window"] = closes[-window_minutes:]
+                state["window"] = closes[-window_minutes:-1]
+                self._update_symbol_momentum(stream_symbol, closes[-1])
+                
+                # Apply the newly backfilled state to all watching orders immediately
+                for order in self._orders.values():
+                    if order["status"] == "watching" and order.get("stream_symbol") == stream_symbol:
+                        order["momentum_state"] = state.get("state", "Steady")
+                        order["momentum_prev"] = state.get("prev")
+                        
         except Exception as e:
             log.warning("Failed to backfill momentum history for %s: %s", stream_symbol, e)
 

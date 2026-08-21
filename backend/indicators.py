@@ -19,6 +19,8 @@ class IndicatorService:
     def __init__(self, client: TradejiniClient):
         self.client = client
         self.bars_by_symbol: Dict[str, List[Dict]] = {}  # symbol -> list of dicts with open, high, low, close, volume, timestamp
+        self.live_vwap: Dict[str, float] = {}
+        self.live_greeks: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
         
     async def bootstrap_symbol(self, symbol_id: str, days_back: int = 5):
@@ -149,6 +151,10 @@ class IndicatorService:
         if not symbol_id:
             return
             
+        vwap = data.get("vwap")
+        if vwap is not None:
+            self.live_vwap[symbol_id] = float(vwap)
+            
         ltp = float(data.get("ltp", 0.0))
         if ltp <= 0:
             return
@@ -234,3 +240,29 @@ class IndicatorService:
             ema = (price - ema) * multiplier + ema
             
         return ema
+
+    def handle_greeks_tick(self, data: dict):
+        symbol_id = data.get("symbol")
+        if not symbol_id:
+            return
+            
+        iv = data.get("iv", 0.0)
+        lowiv = data.get("lowiv", 0.0)
+        highiv = data.get("highiv", 0.0)
+        
+        ivr = 0.0
+        if highiv > lowiv and highiv > 0:
+            ivr = (iv - lowiv) / (highiv - lowiv) * 100.0
+            
+        self.live_greeks[symbol_id] = {
+            "iv": iv,
+            "ivr": ivr,
+            "delta": data.get("delta", 0.0),
+            "timestamp": time.time()
+        }
+
+    def get_vwap(self, symbol_id: str) -> Optional[float]:
+        return self.live_vwap.get(symbol_id)
+
+    def get_ivr(self, symbol_id: str) -> Optional[float]:
+        return self.live_greeks.get(symbol_id, {}).get("ivr")

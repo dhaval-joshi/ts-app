@@ -117,8 +117,17 @@ function riskGroupRowHtml(g) {
 
 // ------------------------------------------------------------- program card
 
-function activeLegsInnerHtml(activeLegs) {
+function activeLegsInnerHtml(activeLegs, status) {
   if (!activeLegs.length) {
+    if (status === "running") {
+      return `<div class="mt-3 flex items-center gap-2 px-3 py-2 bg-indigo-50 border border-indigo-100 rounded-lg">
+                <div class="relative flex h-2 w-2">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+                </div>
+                <span class="text-xs font-medium text-indigo-700">Waiting for indicator entry flag...</span>
+              </div>`;
+    }
     return `<div class="text-xs text-slate-400 mt-3">No active cycle right now.</div>`;
   }
   const activeCyclePnl = activeLegs.reduce((sum, o) => {
@@ -218,7 +227,7 @@ function programCardHtml(program, allOrders, opts = {}) {
        </div>`
     : "";
 
-  const activeLegsHtml = `<div id="active-legs-${cfg.program_id}">${activeLegsInnerHtml(activeLegs)}</div>`;
+  const activeLegsHtml = `<div id="active-legs-${cfg.program_id}">${activeLegsInnerHtml(activeLegs, rt.status)}</div>`;
 
   return `
   <div class="relative ${cfg.mode === "paper" ? "bg-amber-50 border-amber-200" : "bg-white border-slate-200"} border shadow-sm rounded-xl p-5">

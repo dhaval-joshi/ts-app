@@ -25,6 +25,17 @@ async function logout() {
   location.href = "/login";
 }
 
+async function triggerKillSwitch() {
+  if (!confirm("EMERGENCY KILL SWITCH\n\nThis will instantly halt all running programs and square-off all active orders in both live and paper modes.\n\nAre you sure you want to proceed?")) return;
+  try {
+    const res = await api("/api/kill-switch", { method: "POST" });
+    toast(`Kill Switch activated. Halted ${res.halted_programs} programs and closing ${res.closing_orders} orders.`, "error");
+    setTimeout(() => location.reload(), 2000);
+  } catch (e) {
+    toast("Failed to activate kill switch: " + e.message, "error");
+  }
+}
+
 // -------------------------------------------------------- ul/li dropdown
 //
 // Progressively enhances every <select class="js-enhance-select"> into a

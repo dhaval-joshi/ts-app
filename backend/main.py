@@ -114,10 +114,29 @@ async def lifespan(app):
     asyncio.create_task(_heartbeat_loop())
     asyncio.create_task(stream.periodic_resubscribe_loop())  # self-healing safety net for the live-price
                                                                 # subscription -- see its docstring
+    asyncio.create_task(_archive_eod_data_loop())
 
     yield
 
     await client.close()
+
+async def _archive_eod_data_loop():
+    """Runs the EOD historical data pipeline at 15:35 IST daily."""
+    from datetime import datetime, time, timedelta
+    while True:
+        try:
+            now = clock.now()
+            target = datetime.combine(now.date(), time(15, 35)).replace(tzinfo=clock.IST)
+            if now > target:
+                target += timedelta(days=1)
+            
+            await asyncio.sleep((target - now).total_seconds())
+            
+            from .data_archiver import archive_eod_data
+            await archive_eod_data(client, script_master)
+        except Exception:
+            log.exception("EOD Data Archive failed")
+            await asyncio.sleep(300)
 
 
 async def _heartbeat_loop():
@@ -215,6 +234,8 @@ async def _stream_consumer_loop():
                 # one-shot IV/Greeks snapshots for entry_signals.py's optional gate -- see
                 # OrderManager.fetch_greeks_snapshot. Previously silently dropped here (no "ltp"
                 # key on a greeks packet, so it fell through every branch and was discarded).
+                if indicators:
+                    indicators.handle_greeks_tick(data)
                 await manager.handle_greeks_tick(data)
                 await paper_manager.handle_greeks_tick(data)
             elif "ltp" in data:
@@ -783,6 +804,35 @@ async def calendar_page(request):
     return RedirectResponse("/?tab=calendar")
 
 
+async def api_kill_switch(request):
+    token = request.cookies.get(config.SESSION_COOKIE_NAME)
+    if not auth.is_valid_session(token):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    
+    count_prog = 0
+    if programs:
+        for p in programs.list_programs():
+            status = p.get("runtime", {}).get("status")
+            # stop if running or in error
+            if status not in ["stopped_by_user", "halted_portfolio_stop"]:
+                programs.stop_program(p["config"]["program_id"])
+                count_prog += 1
+                
+    count_ord = 0
+    if manager:
+        for o in manager.list_orders():
+            if o["status"] not in ["closed", "cancelled", "rejected", "failed", "closing", "cancelling"]:
+                await manager.close_order(o["order_id"], reason="Kill Switch triggered")
+                count_ord += 1
+    if paper_manager:
+        for o in paper_manager.list_orders():
+            if o["status"] not in ["closed", "cancelled", "rejected", "failed", "closing", "cancelling"]:
+                await paper_manager.close_order(o["order_id"], reason="Kill Switch triggered")
+                count_ord += 1
+                
+    return JSONResponse({"ok": True, "halted_programs": count_prog, "closing_orders": count_ord})
+
+
 routes = [
     Route("/", index),
     Route("/login", login_page),
@@ -793,6 +843,7 @@ routes = [
     Route("/order", order_page),
     Route("/archive", archive_page),
     Route("/calendar", calendar_page),
+    Route("/api/kill-switch", api_kill_switch, methods=["POST"]),
     Route("/api/orders", api_list_orders, methods=["GET"]),
     Route("/api/orders", api_create_order, methods=["POST"]),
     Route("/api/orders/{order_id}", api_get_order, methods=["GET"]),
