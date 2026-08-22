@@ -189,10 +189,13 @@ async def _script_master_refresh_loop():
             try:
                 await script_master.refresh()
                 if not backfilled_once:
-                    symbol_ids = list(script_master._indices.keys())
-                    if "IDX_-15_NSE" not in symbol_ids:
-                        symbol_ids.append("IDX_-15_NSE")
-                    asyncio.create_task(indicators.backfill_daily_signals(symbol_ids, days_back=30))
+                    # Only backfill data for indices that are actually used in our programs, plus VIX
+                    active_programs = store.list_programs()
+                    active_indices = {p.get("config", {}).get("index_id") for p in active_programs if p.get("config", {}).get("index_id")}
+                    active_indices.add("IDX_-15_NSE") # Always need VIX
+                    active_indices.discard(None)
+                    
+                    asyncio.create_task(indicators.backfill_daily_signals(list(active_indices), days_back=30))
                     backfilled_once = True
             except Exception:
                 log.exception("Scrip master refresh failed -- will retry.")
@@ -770,7 +773,7 @@ async def api_run_backtest(request):
     
     engine = ChronosEngine(client, script_master)
     try:
-        result = await engine.run_backtest(program_id, days_back, capital, is_group=is_group)
+        result = await engine.run_backtest(program_id, days_back, capital, is_group=is_group, progress_cb=broadcast_ws_event)
         if "error" in result:
             return JSONResponse({"detail": result["error"]}, status_code=400)
         return JSONResponse(result)
@@ -863,7 +866,16 @@ async def ws_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         _ws_clients.discard(websocket)
 
-
+from typing import Any
+async def broadcast_ws_event(msg_type: str, message: Any):
+    data = {"type": msg_type, "message": message}
+    import json
+    msg = json.dumps(data)
+    for ws in list(_ws_clients):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            pass
 # ------------------------------------------------------------- frontend --
 
 async def index(request):

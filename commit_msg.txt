@@ -1,25 +1,22 @@
-feat(core): Phase 1 complete - Chronos, Sentinel, ORB Signals & BSM Greeks
+feat(core): Chronos PnL accuracy, Backtest UI Trades Export, Sentinel Min DTE logic
 
-This is a massive consolidation commit covering multiple Iterations from the Unified Framework (up through Iteration 1.4 Overlord). It brings full backtesting capabilities, live indicator tracking, and fully autonomous regime-aware orchestration.
+This commit consolidates critical mathematical fixes to the backtest engine and introduces crucial constraints to the Sentinel orchestration UI, alongside a fully reconstructed trades reporting table.
 
-### 1. Chronos Backtesting Engine & BSM Calculator
-- **`chronos.py`**: Added a native backtesting engine that simulates minute-by-minute order execution against historical OHLCV data. Fixed cyclic websocket imports that previously crashed the simulation on the first trade.
-- **`bsm_calculator.py`**: Introduced a pure mathematical Black-Scholes model utilizing the Newton-Raphson method to reverse-engineer Implied Volatility (IV) and calculate Delta, Gamma, Theta, and Vega from historical tick data.
-- **Dependencies**: Added `numpy` and `scipy` for CDF/PDF standard normal distribution functions.
+### 1. Chronos Mathematical Accuracy & Expiry Logic
+- **`chronos.py`**: Fixed a massive compounding bug where premium received on `SELL` trades was erroneously added back into capital at entry while also being tracked in PnL, causing infinite capital scaling (e.g. 600-billion trades).
+- **Expiry Proximity Filtering**: Chronos now simulates `next_expiry` properly using the active backtest date rather than `datetime.now()`. Added a strict mathematical buffer (`max_days = min_days + 10`) that actively prevents backtesting highly-inflated month-out options if the real weekly option data is not available.
 
-### 2. Autonomous Sentinel & The Orchestrator (Iteration 1.4 Overlord)
-- **`sentinel_orchestrator.py`**: Completely overhauled Sentinel Groups to dynamically rotate capital between mutually exclusive child programs (`SIDEWAYS`, `DIRECTIONAL`, `VOLATILE`).
-- **Autonomous Mode**: Decoupled static configuration limits. The engine now uses `autonomous_sentinel` execution mode to directly obey the global Regime Classifier and bypass manual entry gates.
-- **Admin UI Decoupling**: Moved the global Sentinel Settings (ADX period, ATR threshold) out of the main Cockpit dashboard and into a secure `/admin` panel to prevent accidental overrides during volatile trading.
+### 2. Sentinel DTE Configuration
+- **`models.py` & `program_manager.py`**: Expanded the `SentinelGroup` schema to allow configuration of `min_working_days_to_expiry`. Orchestrator now correctly passes this down into dynamic spawn payloads.
+- **`frontend/programs.js`**: Rebuilt the Sentinel creation form to parse execution modes (`paper` vs `live`) and display the Min DTE numeric constraints explicitly.
+- **Paper Styling**: Dynamic styling matches Advanced OMS. Sentinel Groups in "paper" mode now correctly render with an amber background and a designated "PAPER" UI badge.
 
-### 3. ORB Breakout Signal Engine & Live Indicators
-- **`signal_engine.py`**: Created a live L1 streaming processor that tracks N-minute Opening Range Breakouts (ORB) on underlying indices to trigger single-leg option entries unconditionally on breakouts.
-- **`indicators.py`**: Added bootstrapping mechanisms to pull historical index data from Tradejini on startup (handling MS/S epoch offsets) to immediately prime Squeeze metrics, VWAP, RSI, and EMA models.
+### 3. Backtest Report UI & Data Export
+- **Trades Table**: The Chronos backtest UI was upgraded from simple "events" to full trade analysis. The grid now accurately reflects mathematical Max Drawdown.
+- **`exportBacktestTradesCsv`**: Reintroduced the `CSV Export` button directly in the modal, which exports highly detailed trade-by-trade analytics including `Capital Deployed`, `Script(s) traded`, `Entry/Exit timestamps`, and absolute `PnL`.
+- **WebSocket Streaming**: Fixed JSON stringification that caused the `[object Object]` bug, restoring precise percentage loading updates onto the user interface.
 
-### 4. Manual Single-Leg Options Trading
-- **`program_manager.py`**: Implemented `start_manual_single_leg_cycle`, allowing traders to leverage 100% of a program's configured capital on a single directional (CE or PE) leg, ignoring standard paired short-straddle auto-tick cycles.
-- **UI Enhancements**: Added manual entry mode toggles to the frontend, parsing indicator statuses directly onto active cards.
+### 4. Tradejini API Rate-Limit Resilience
+- **`tradejini_client.py`**: Intercepted Tradejini's `get_scrip_groups` and injected local caching. ScriptMaster now detects if `isUpdated=True` matches today's date, blocking redundant gigabyte-sized CSV re-downloads on every app startup. Added JSON disk caching for historical minute-interval charts to drastically speed up multi-run backtests.
 
-### 5. Architectural Cleanups
-- Removed outdated static JSON configurations from Sentinel Groups in `models.py`.
-- Pushed Handover artifacts tracking all changes to `agent-actions/coded/` and `agent-actions/planned/`.
+All architectural implementation plans and code validations are logged durably in `agent-actions/`.

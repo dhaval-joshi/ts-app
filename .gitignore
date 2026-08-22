@@ -15,3 +15,5 @@ __temp/
 *.p12
 *.pfx
 data.db
+tradejini.db
+.cache/

@@ -604,6 +604,8 @@ class SentinelGroupConfig:
     capital_per_leg: Optional[float] = None
     sizing_mode: str = "capital"
     is_active: bool = False
+    mode: str = "paper"
+    min_working_days_to_expiry: int = 0
     
     @classmethod
     def from_dict(cls, d: dict) -> "SentinelGroupConfig":
@@ -619,15 +621,23 @@ class SentinelGroupConfig:
         else:
             capital_per_leg = None
             
+        min_working_days = d.get("min_working_days_to_expiry")
+        if min_working_days is None or min_working_days == "":
+            min_working_days = 0
+        else:
+            min_working_days = int(min_working_days)
+            
         return cls(
             sentinel_group_id=sentinel_group_id,
             name=name,
-            index_id=d.get("index_id") or "IDX_NIFTY_NSE",
+            index_id=d.get("index_id") or "IDX_-1_NSE",
             risk_group_id=d.get("risk_group_id"),
             broker_id=d.get("broker_id") or "tradejini",
             capital_per_leg=capital_per_leg,
             sizing_mode=sizing_mode,
-            is_active=bool(d.get("is_active"))
+            is_active=bool(d.get("is_active")),
+            mode=d.get("mode") or "paper",
+            min_working_days_to_expiry=min_working_days
         )
 
 

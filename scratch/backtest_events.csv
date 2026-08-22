@@ -1,0 +1,361 @@
+Time,Message,PnL
+03 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹390000.00,
+03 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,1140.7499999999989
+04 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹520000.00,
+04 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,104.00000000000148
+05 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹650000.00,
+05 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,-6028.7499999999945
+06 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹780000.00,
+06 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,-4816.499999999986
+07 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹910000.00,
+07 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,11852.749999999993
+10 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹1170000.00,
+10 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,16730.999999999996
+11 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹1430000.00,
+11 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,21878.999999999996
+12 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹1690000.00,
+12 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,22519.25000000003
+13 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹2080000.00,
+13 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,15027.999999999989
+14 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹2340000.00,
+14 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,7371.000000000014
+17 Aug 09:20,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹2730000.00,
+17 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,2525.2499999999923
+17 Aug 15:29,Regime shifted to DIRECTIONAL,
+18 Aug 09:15,Regime shifted to VOLATILE,
+18 Aug 09:20,Regime shifted to DIRECTIONAL,
+18 Aug 09:31,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3206872.50,
+18 Aug 09:32,Trailing Stop moved to 4.34% (High PnL: 0.66%),
+18 Aug 09:36,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-200996.24999999974
+18 Aug 09:37,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3022656.00,
+18 Aug 09:38,Trailing Stop moved to 1.82% (High PnL: 3.18%),
+18 Aug 09:43,Trailing Stop moved to 1.20% (High PnL: 3.80%),
+18 Aug 09:44,Trailing Stop moved to -1.28% (High PnL: 6.28%),
+18 Aug 09:45,Trailing Stop moved to -3.59% (High PnL: 8.59%),
+18 Aug 09:46,Trailing Stop moved to -5.28% (High PnL: 10.28%),
+18 Aug 09:48,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,132288.0000000003
+18 Aug 09:49,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3144960.00,
+18 Aug 09:50,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 09:51,Trailing Stop moved to 2.66% (High PnL: 2.34%),
+18 Aug 09:53,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-88451.99999999985
+18 Aug 09:54,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3066375.00,
+18 Aug 09:55,Trailing Stop moved to 1.86% (High PnL: 3.14%),
+18 Aug 10:02,Trailing Stop moved to 0.22% (High PnL: 4.78%),
+18 Aug 10:07,Regime shifted to SIDEWAYS,
+18 Aug 10:07,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),117845.00000000013
+18 Aug 10:08,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹3120000.00,
+18 Aug 10:17,Regime shifted to DIRECTIONAL,
+18 Aug 10:17,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-2106.0000000000355
+18 Aug 10:18,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3538749.50,
+18 Aug 10:19,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 10:25,Regime shifted to SIDEWAYS,
+18 Aug 10:25,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),-39968.49999999991
+18 Aug 10:26,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹3380000.00,
+18 Aug 10:46,Regime shifted to DIRECTIONAL,
+18 Aug 10:46,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),3126.4999999999663
+18 Aug 10:47,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3923881.00,
+18 Aug 10:48,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 10:51,Trailing Stop moved to 4.62% (High PnL: 0.38%),
+18 Aug 10:52,Trailing Stop moved to 3.48% (High PnL: 1.52%),
+18 Aug 10:53,Trailing Stop moved to 2.55% (High PnL: 2.45%),
+18 Aug 10:55,Trailing Stop moved to 0.15% (High PnL: 4.85%),
+18 Aug 10:59,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-24813.75
+18 Aug 11:00,Entered DIRECTIONAL (buy PE) - Capital Used: ₹3898375.00,
+18 Aug 11:01,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 11:08,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-253499.9999999999
+18 Aug 11:09,Regime shifted to SIDEWAYS,
+18 Aug 11:09,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹3640000.00,
+18 Aug 11:31,Regime shifted to DIRECTIONAL,
+18 Aug 11:31,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-10373.99999999998
+18 Aug 11:32,Regime shifted to SIDEWAYS,
+18 Aug 11:32,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹4030000.00,
+18 Aug 11:53,Regime shifted to DIRECTIONAL,
+18 Aug 11:53,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),9168.249999999995
+18 Aug 11:54,Entered DIRECTIONAL (buy PE) - Capital Used: ₹4619745.00,
+18 Aug 11:55,Regime shifted to SIDEWAYS,
+18 Aug 11:55,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),63921.00000000022
+18 Aug 11:56,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹4550000.00,
+18 Aug 12:07,Regime shifted to DIRECTIONAL,
+18 Aug 12:07,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),5232.500000000058
+18 Aug 12:08,Entered DIRECTIONAL (buy PE) - Capital Used: ₹5238077.00,
+18 Aug 12:09,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 12:12,Trailing Stop moved to 4.07% (High PnL: 0.93%),
+18 Aug 12:13,Trailing Stop moved to 3.58% (High PnL: 1.42%),
+18 Aug 12:15,Regime shifted to SIDEWAYS,
+18 Aug 12:15,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),95406.99999999987
+18 Aug 12:16,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹5330000.00,
+18 Aug 12:47,Regime shifted to DIRECTIONAL,
+18 Aug 12:47,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-3464.4999999999923
+18 Aug 12:48,Entered DIRECTIONAL (buy PE) - Capital Used: ₹5972512.00,
+18 Aug 12:49,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 12:50,Regime shifted to SIDEWAYS,
+18 Aug 12:50,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),-127400.0
+18 Aug 12:51,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹5850000.00,
+18 Aug 13:05,Regime shifted to DIRECTIONAL,
+18 Aug 13:05,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),1901.249999999975
+18 Aug 13:06,Entered DIRECTIONAL (buy PE) - Capital Used: ₹6576326.25,
+18 Aug 13:07,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 13:08,Regime shifted to SIDEWAYS,
+18 Aug 13:08,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),-272775.7499999998
+18 Aug 13:09,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹6240000.00,
+18 Aug 14:57,Regime shifted to DIRECTIONAL,
+18 Aug 14:57,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),13884.00000000001
+18 Aug 14:58,Entered DIRECTIONAL (buy PE) - Capital Used: ₹7103177.25,
+18 Aug 14:59,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+18 Aug 15:00,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-548632.5
+18 Aug 15:01,Entered DIRECTIONAL (buy PE) - Capital Used: ₹6611296.25,
+18 Aug 15:02,Trailing Stop moved to 3.62% (High PnL: 1.38%),
+18 Aug 15:03,Trailing Stop moved to 0.94% (High PnL: 4.06%),
+18 Aug 15:04,Trailing Stop moved to -0.25% (High PnL: 5.25%),
+18 Aug 15:11,Regime shifted to SIDEWAYS,
+18 Aug 15:11,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),179877.74999999965
+18 Aug 15:14,Regime shifted to DIRECTIONAL,
+19 Aug 09:15,Regime shifted to VOLATILE,
+19 Aug 09:20,Entered VOLATILE (sell Straddle) - Capital Used: ₹6760000.00,
+19 Aug 09:21,Regime shifted to DIRECTIONAL,
+19 Aug 09:21,Closed VOLATILE (sell Straddle) due to Smart Exit (Regime Shift),-4225.0
+19 Aug 09:31,Entered DIRECTIONAL (buy PE) - Capital Used: ₹7546448.00,
+19 Aug 09:32,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 09:33,Trailing Stop moved to 2.54% (High PnL: 2.46%),
+19 Aug 09:35,Trailing Stop moved to 2.18% (High PnL: 2.82%),
+19 Aug 09:36,Trailing Stop moved to 1.65% (High PnL: 3.35%),
+19 Aug 09:37,Trailing Stop moved to 0.47% (High PnL: 4.53%),
+19 Aug 09:39,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-63108.49999999924
+19 Aug 09:40,Entered DIRECTIONAL (buy PE) - Capital Used: ₹7492982.25,
+19 Aug 09:41,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 09:43,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-442640.24999999977
+19 Aug 09:44,Entered DIRECTIONAL (buy PE) - Capital Used: ₹7095764.00,
+19 Aug 09:45,Trailing Stop moved to 4.20% (High PnL: 0.80%),
+19 Aug 09:46,Trailing Stop moved to 4.06% (High PnL: 0.94%),
+19 Aug 09:49,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-383811.9999999998
+19 Aug 09:50,Entered DIRECTIONAL (buy PE) - Capital Used: ₹6749320.50,
+19 Aug 09:51,Trailing Stop moved to 3.04% (High PnL: 1.96%),
+19 Aug 09:52,Trailing Stop moved to 2.45% (High PnL: 2.55%),
+19 Aug 09:55,Trailing Stop moved to 1.18% (High PnL: 3.82%),
+19 Aug 09:57,Trailing Stop moved to 0.79% (High PnL: 4.21%),
+19 Aug 10:01,Regime shifted to SIDEWAYS,
+19 Aug 10:01,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),267725.25000000076
+19 Aug 10:02,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹6890000.00,
+19 Aug 10:24,Regime shifted to DIRECTIONAL,
+19 Aug 10:24,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),22220.24999999996
+19 Aug 10:25,Entered DIRECTIONAL (buy PE) - Capital Used: ₹7792083.00,
+19 Aug 10:26,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 10:27,Trailing Stop moved to 4.78% (High PnL: 0.22%),
+19 Aug 10:29,Trailing Stop moved to 2.93% (High PnL: 2.07%),
+19 Aug 10:30,Trailing Stop moved to 2.71% (High PnL: 2.29%),
+19 Aug 10:31,Trailing Stop moved to 2.44% (High PnL: 2.56%),
+19 Aug 10:34,Trailing Stop moved to 0.20% (High PnL: 4.80%),
+19 Aug 10:37,Trailing Stop moved to -2.04% (High PnL: 7.04%),
+19 Aug 10:41,Trailing Stop moved to -5.09% (High PnL: 10.09%),
+19 Aug 10:42,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,331577.9999999993
+19 Aug 10:43,Entered DIRECTIONAL (buy PE) - Capital Used: ₹8089640.00,
+19 Aug 10:44,Trailing Stop moved to 4.84% (High PnL: 0.16%),
+19 Aug 10:45,Trailing Stop moved to 0.64% (High PnL: 4.36%),
+19 Aug 10:46,Trailing Stop moved to 0.27% (High PnL: 4.73%),
+19 Aug 10:50,Trailing Stop moved to -0.11% (High PnL: 5.11%),
+19 Aug 10:51,Trailing Stop moved to -0.43% (High PnL: 5.43%),
+19 Aug 10:54,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,0.0
+19 Aug 10:55,Entered DIRECTIONAL (buy PE) - Capital Used: ₹8090582.50,
+19 Aug 10:56,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 10:58,Trailing Stop moved to 4.35% (High PnL: 0.65%),
+19 Aug 10:59,Trailing Stop moved to 1.71% (High PnL: 3.29%),
+19 Aug 11:02,Trailing Stop moved to -1.36% (High PnL: 6.36%),
+19 Aug 11:04,Trailing Stop moved to -1.74% (High PnL: 6.74%),
+19 Aug 11:05,Trailing Stop moved to -1.95% (High PnL: 6.95%),
+19 Aug 11:07,Trailing Stop moved to -9.18% (High PnL: 14.18%),
+19 Aug 11:09,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,654225.0
+19 Aug 11:10,Entered DIRECTIONAL (buy PE) - Capital Used: ₹8675774.25,
+19 Aug 11:11,Trailing Stop moved to 1.96% (High PnL: 3.04%),
+19 Aug 11:19,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-228657.00000000076
+19 Aug 11:20,Entered DIRECTIONAL (buy PE) - Capital Used: ₹8469756.75,
+19 Aug 11:21,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 11:24,Regime shifted to SIDEWAYS,
+19 Aug 11:24,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),30735.2499999995
+19 Aug 11:25,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹8450000.00,
+19 Aug 11:52,Regime shifted to DIRECTIONAL,
+19 Aug 11:52,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-422.499999999976
+19 Aug 11:53,Entered DIRECTIONAL (buy PE) - Capital Used: ₹9457929.00,
+19 Aug 11:54,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 11:55,Trailing Stop moved to 4.53% (High PnL: 0.47%),
+19 Aug 11:56,Trailing Stop moved to 3.77% (High PnL: 1.23%),
+19 Aug 12:00,Trailing Stop moved to 3.06% (High PnL: 1.94%),
+19 Aug 12:01,Trailing Stop moved to 1.46% (High PnL: 3.54%),
+19 Aug 12:02,Trailing Stop moved to 0.37% (High PnL: 4.63%),
+19 Aug 12:03,Trailing Stop moved to -2.46% (High PnL: 7.46%),
+19 Aug 12:04,Trailing Stop moved to -5.20% (High PnL: 10.20%),
+19 Aug 12:09,Trailing Stop moved to -7.70% (High PnL: 12.70%),
+19 Aug 12:12,Trailing Stop moved to -8.27% (High PnL: 13.27%),
+19 Aug 12:13,Trailing Stop moved to -10.49% (High PnL: 15.49%),
+19 Aug 12:17,Regime shifted to SIDEWAYS,
+19 Aug 12:17,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),1027065.0
+19 Aug 12:18,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹10270000.00,
+19 Aug 13:30,Regime shifted to DIRECTIONAL,
+19 Aug 13:30,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),2824.250000000058
+19 Aug 13:31,Entered DIRECTIONAL (buy PE) - Capital Used: ₹11533567.50,
+19 Aug 13:32,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 13:33,Trailing Stop moved to 2.98% (High PnL: 2.02%),
+19 Aug 13:37,Regime shifted to SIDEWAYS,
+19 Aug 13:37,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),-101328.49999999932
+19 Aug 13:38,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹11440000.00,
+19 Aug 14:23,Regime shifted to DIRECTIONAL,
+19 Aug 14:23,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),22879.99999999992
+19 Aug 14:24,Entered DIRECTIONAL (buy PE) - Capital Used: ₹12726236.25,
+19 Aug 14:25,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 14:26,Trailing Stop moved to 4.30% (High PnL: 0.70%),
+19 Aug 14:29,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-590294.2500000007
+19 Aug 14:30,Entered DIRECTIONAL (buy PE) - Capital Used: ₹12197887.00,
+19 Aug 14:31,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+19 Aug 14:35,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-2515233.5000000005
+19 Aug 14:36,Entered DIRECTIONAL (buy PE) - Capital Used: ₹9936680.00,
+19 Aug 14:37,Trailing Stop moved to -2.93% (High PnL: 7.93%),
+19 Aug 14:38,Trailing Stop moved to -9.53% (High PnL: 14.53%),
+19 Aug 14:39,Trailing Stop moved to -10.55% (High PnL: 15.55%),
+19 Aug 14:41,Regime shifted to SIDEWAYS,
+19 Aug 14:41,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),1815840.0000000007
+19 Aug 14:42,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹11570000.00,
+19 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,16487.25000000005
+20 Aug 09:15,Regime shifted to VOLATILE,
+20 Aug 09:20,Entered VOLATILE (sell Straddle) - Capital Used: ₹12740000.00,
+20 Aug 09:22,Regime shifted to DIRECTIONAL,
+20 Aug 09:22,Closed VOLATILE (sell Straddle) due to Smart Exit (Regime Shift),-14650.999999999982
+20 Aug 09:34,Entered DIRECTIONAL (buy CE) - Capital Used: ₹14015612.00,
+20 Aug 09:35,Trailing Stop moved to 2.61% (High PnL: 2.39%),
+20 Aug 09:36,Trailing Stop moved to 2.31% (High PnL: 2.69%),
+20 Aug 09:37,Trailing Stop moved to 2.27% (High PnL: 2.73%),
+20 Aug 09:40,Trailing Stop moved to 1.13% (High PnL: 3.87%),
+20 Aug 09:43,Trailing Stop moved to 1.05% (High PnL: 3.95%),
+20 Aug 09:44,Trailing Stop moved to 0.07% (High PnL: 4.93%),
+20 Aug 09:45,Trailing Stop moved to -0.01% (High PnL: 5.01%),
+20 Aug 09:52,Closed DIRECTIONAL (buy CE) due to Trailing Stop Hit,-116974.00000000242
+20 Aug 09:53,Entered DIRECTIONAL (buy CE) - Capital Used: ₹13908144.25,
+20 Aug 09:54,Trailing Stop moved to 0.52% (High PnL: 4.48%),
+20 Aug 09:55,Trailing Stop moved to -1.24% (High PnL: 6.24%),
+20 Aug 09:56,Trailing Stop moved to -2.55% (High PnL: 7.55%),
+20 Aug 10:05,Closed DIRECTIONAL (buy CE) due to Trailing Stop Hit,346238.75
+20 Aug 10:06,Entered DIRECTIONAL (buy CE) - Capital Used: ₹14220960.00,
+20 Aug 10:07,Trailing Stop moved to 4.09% (High PnL: 0.91%),
+20 Aug 10:10,Trailing Stop moved to 3.33% (High PnL: 1.67%),
+20 Aug 10:11,Trailing Stop moved to 2.13% (High PnL: 2.87%),
+20 Aug 10:14,Trailing Stop moved to 0.82% (High PnL: 4.18%),
+20 Aug 10:15,Trailing Stop moved to 0.28% (High PnL: 4.72%),
+20 Aug 10:27,Regime shifted to SIDEWAYS,
+20 Aug 10:27,Closed DIRECTIONAL (buy CE) due to Smart Exit (Regime Shift),-108517.49999999824
+20 Aug 10:28,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹14040000.00,
+20 Aug 11:22,Regime shifted to DIRECTIONAL,
+20 Aug 11:22,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),34749.00000000002
+20 Aug 11:23,Entered DIRECTIONAL (buy CE) - Capital Used: ₹15438735.00,
+20 Aug 11:24,Trailing Stop moved to 4.42% (High PnL: 0.58%),
+20 Aug 11:25,Trailing Stop moved to 4.30% (High PnL: 0.70%),
+20 Aug 11:27,Trailing Stop moved to 2.74% (High PnL: 2.26%),
+20 Aug 11:29,Trailing Stop moved to 2.50% (High PnL: 2.50%),
+20 Aug 11:30,Trailing Stop moved to -0.30% (High PnL: 5.30%),
+20 Aug 11:31,Trailing Stop moved to -2.80% (High PnL: 7.80%),
+20 Aug 11:32,Trailing Stop moved to -6.11% (High PnL: 11.11%),
+20 Aug 11:46,Trailing Stop moved to -7.67% (High PnL: 12.67%),
+20 Aug 11:56,Trailing Stop moved to -8.84% (High PnL: 13.84%),
+20 Aug 12:06,Regime shifted to SIDEWAYS,
+20 Aug 12:06,Closed DIRECTIONAL (buy CE) due to Smart Exit (Regime Shift),1751529.0000000014
+20 Aug 12:07,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹16900000.00,
+20 Aug 12:48,Regime shifted to DIRECTIONAL,
+20 Aug 12:48,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-209559.99999999997
+20 Aug 12:49,Entered DIRECTIONAL (buy CE) - Capital Used: ₹18363800.00,
+20 Aug 12:50,Trailing Stop moved to -2.39% (High PnL: 7.39%),
+20 Aug 12:51,Trailing Stop moved to -6.29% (High PnL: 11.29%),
+20 Aug 12:53,Closed DIRECTIONAL (buy CE) due to Trailing Stop Hit,787020.0
+20 Aug 12:54,Entered DIRECTIONAL (buy CE) - Capital Used: ₹19067041.50,
+20 Aug 12:55,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+20 Aug 13:07,Regime shifted to SIDEWAYS,
+20 Aug 13:07,Closed DIRECTIONAL (buy CE) due to Smart Exit (Regime Shift),-340365.99999999924
+20 Aug 13:08,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹18720000.00,
+20 Aug 14:04,Regime shifted to DIRECTIONAL,
+20 Aug 14:04,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),102491.99999999977
+20 Aug 14:05,Entered DIRECTIONAL (buy CE) - Capital Used: ₹20613125.00,
+20 Aug 14:06,Trailing Stop moved to 2.75% (High PnL: 2.25%),
+20 Aug 14:07,Trailing Stop moved to 0.94% (High PnL: 4.06%),
+20 Aug 14:08,Regime shifted to SIDEWAYS,
+20 Aug 14:08,Closed DIRECTIONAL (buy CE) due to Smart Exit (Regime Shift),780000.0000000019
+20 Aug 14:09,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹21190000.00,
+20 Aug 15:10,Regime shifted to DIRECTIONAL,
+20 Aug 15:10,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),55623.75000000015
+20 Aug 15:21,Regime shifted to SIDEWAYS,
+20 Aug 15:29,Regime shifted to DIRECTIONAL,
+21 Aug 09:15,Regime shifted to VOLATILE,
+21 Aug 09:20,Entered VOLATILE (sell Straddle) - Capital Used: ₹23140000.00,
+21 Aug 09:22,Regime shifted to DIRECTIONAL,
+21 Aug 09:22,Closed VOLATILE (sell Straddle) due to Smart Exit (Regime Shift),-2313.999999999951
+21 Aug 09:32,Entered DIRECTIONAL (buy PE) - Capital Used: ₹25229854.00,
+21 Aug 09:33,Trailing Stop moved to 4.84% (High PnL: 0.16%),
+21 Aug 09:34,Regime shifted to SIDEWAYS,
+21 Aug 09:34,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),864318.0000000006
+21 Aug 09:35,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹26000000.00,
+21 Aug 09:44,Regime shifted to DIRECTIONAL,
+21 Aug 09:44,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-23399.999999999964
+21 Aug 09:45,Entered DIRECTIONAL (buy PE) - Capital Used: ₹28183281.75,
+21 Aug 09:46,Trailing Stop moved to -0.37% (High PnL: 5.37%),
+21 Aug 09:53,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-642885.7499999988
+21 Aug 09:54,Entered DIRECTIONAL (buy PE) - Capital Used: ₹27604645.25,
+21 Aug 09:55,Trailing Stop moved to 2.85% (High PnL: 2.15%),
+21 Aug 09:56,Trailing Stop moved to 2.19% (High PnL: 2.81%),
+21 Aug 09:59,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-612982.5
+21 Aug 10:00,Entered DIRECTIONAL (buy PE) - Capital Used: ₹27053666.25,
+21 Aug 10:01,Trailing Stop moved to 4.63% (High PnL: 0.37%),
+21 Aug 10:02,Trailing Stop moved to 2.32% (High PnL: 2.68%),
+21 Aug 10:04,Trailing Stop moved to 1.88% (High PnL: 3.12%),
+21 Aug 10:05,Trailing Stop moved to 0.91% (High PnL: 4.09%),
+21 Aug 10:07,Trailing Stop moved to 0.32% (High PnL: 4.68%),
+21 Aug 10:08,Regime shifted to SIDEWAYS,
+21 Aug 10:08,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),1971196.5000000023
+21 Aug 10:09,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹28730000.00,
+21 Aug 10:31,Regime shifted to DIRECTIONAL,
+21 Aug 10:31,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-41658.50000000008
+21 Aug 10:32,Entered DIRECTIONAL (buy PE) - Capital Used: ₹31017801.75,
+21 Aug 10:33,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+21 Aug 10:35,Trailing Stop moved to 3.19% (High PnL: 1.81%),
+21 Aug 10:39,Regime shifted to SIDEWAYS,
+21 Aug 10:39,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),561297.7500000028
+21 Aug 10:40,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹31460000.00,
+21 Aug 10:42,Regime shifted to DIRECTIONAL,
+21 Aug 10:42,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),-14156.999999999865
+21 Aug 10:43,Entered DIRECTIONAL (buy PE) - Capital Used: ₹33980407.50,
+21 Aug 10:44,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+21 Aug 10:47,Trailing Stop moved to 3.23% (High PnL: 1.77%),
+21 Aug 10:52,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,-1446555.4999999993
+21 Aug 10:53,Entered DIRECTIONAL (buy PE) - Capital Used: ₹32679640.50,
+21 Aug 10:54,Trailing Stop moved to 3.90% (High PnL: 1.10%),
+21 Aug 10:55,Trailing Stop moved to 2.63% (High PnL: 2.37%),
+21 Aug 10:57,Trailing Stop moved to -0.33% (High PnL: 5.33%),
+21 Aug 11:04,Regime shifted to SIDEWAYS,
+21 Aug 11:04,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),276477.5
+21 Aug 11:05,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹32890000.00,
+21 Aug 12:04,Regime shifted to DIRECTIONAL,
+21 Aug 12:04,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),126626.49999999993
+21 Aug 12:05,Entered DIRECTIONAL (buy PE) - Capital Used: ₹35648028.00,
+21 Aug 12:06,Trailing Stop moved to 1.68% (High PnL: 3.32%),
+21 Aug 12:07,Trailing Stop moved to 0.18% (High PnL: 4.82%),
+21 Aug 12:08,Trailing Stop moved to -0.13% (High PnL: 5.13%),
+21 Aug 12:09,Trailing Stop moved to -0.92% (High PnL: 5.92%),
+21 Aug 12:14,Trailing Stop moved to -4.00% (High PnL: 9.00%),
+21 Aug 12:16,Trailing Stop moved to -5.35% (High PnL: 10.35%),
+21 Aug 12:19,Closed DIRECTIONAL (buy PE) due to Trailing Stop Hit,1238952.0000000016
+21 Aug 12:20,Entered DIRECTIONAL (buy PE) - Capital Used: ₹36764650.00,
+21 Aug 12:21,Trailing Stop moved to 5.00% (High PnL: 0.00%),
+21 Aug 12:24,Trailing Stop moved to 4.31% (High PnL: 0.69%),
+21 Aug 12:25,Regime shifted to SIDEWAYS,
+21 Aug 12:25,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),-169162.4999999984
+21 Aug 12:26,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹36530000.00,
+21 Aug 13:07,Regime shifted to DIRECTIONAL,
+21 Aug 13:07,Closed SIDEWAYS (sell Straddle) due to Smart Exit (Regime Shift),23744.49999999995
+21 Aug 13:08,Entered DIRECTIONAL (buy PE) - Capital Used: ₹39403971.75,
+21 Aug 13:09,Trailing Stop moved to 3.53% (High PnL: 1.47%),
+21 Aug 13:10,Trailing Stop moved to 2.15% (High PnL: 2.85%),
+21 Aug 13:13,Trailing Stop moved to 1.98% (High PnL: 3.02%),
+21 Aug 13:14,Trailing Stop moved to 1.03% (High PnL: 3.97%),
+21 Aug 13:15,Trailing Stop moved to -0.69% (High PnL: 5.69%),
+21 Aug 13:16,Trailing Stop moved to -1.47% (High PnL: 6.47%),
+21 Aug 13:20,Trailing Stop moved to -1.90% (High PnL: 6.90%),
+21 Aug 13:21,Trailing Stop moved to -5.01% (High PnL: 10.01%),
+21 Aug 13:22,Trailing Stop moved to -7.86% (High PnL: 12.86%),
+21 Aug 13:24,Regime shifted to SIDEWAYS,
+21 Aug 13:24,Closed DIRECTIONAL (buy PE) due to Smart Exit (Regime Shift),4351775.999999994
+21 Aug 13:25,Entered SIDEWAYS (sell Straddle) - Capital Used: ₹43290000.00,
+21 Aug 15:15,Closed SIDEWAYS (sell Straddle) due to EOD Exit,11904.750000000246

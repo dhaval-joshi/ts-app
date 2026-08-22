@@ -279,7 +279,9 @@ class ProgramManager:
                 "execution_mode": "autonomous_sentinel", # Tag as autonomous
                 "target_regime": regime,
                 "sentinel_group_id": cfg.sentinel_group_id,
-                "is_auto_generated": True
+                "is_auto_generated": True,
+                "mode": cfg.mode,
+                "min_working_days_to_expiry": getattr(cfg, "min_working_days_to_expiry", 0)
             }
             
             # If exists, update; else create

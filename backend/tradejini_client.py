@@ -8,7 +8,9 @@ Access tokens last 24h; on any 401 we transparently re-authenticate once and
 retry the call.
 """
 import asyncio
+import json
 import logging
+import os
 import time
 from typing import Optional
 
@@ -180,11 +182,33 @@ class TradejiniClient:
         return resp.text
 
     async def get_interval_chart_data(self, symbol_id: str, interval: str, from_ts: int, to_ts: int) -> list:
-        """GET /api/mkt-data/chart/interval-data -- fetches historical chart data."""
+        """GET /api/mkt-data/chart/interval-data -- fetches historical chart data with disk caching."""
+        cache_dir = os.path.join(".cache", "mkt_data")
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        safe_symbol = symbol_id.replace(":", "_").replace("/", "_")
+        cache_file = os.path.join(cache_dir, f"{safe_symbol}_{interval}_{from_ts}_{to_ts}.json")
+        
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                log.warning(f"Failed to read cache file {cache_file}: {e}")
+        
         payload = await self._request("GET", "/api/mkt-data/chart/interval-data", params={
             "id": symbol_id, "interval": interval, "from": from_ts, "to": to_ts
         })
-        return payload.get("d") or []
+        data = payload.get("d") or []
+        
+        if data:
+            try:
+                with open(cache_file, "w") as f:
+                    json.dump(data, f)
+            except Exception as e:
+                log.warning(f"Failed to write cache file {cache_file}: {e}")
+                
+        return data
 
     async def close(self):
         await self._http.aclose()

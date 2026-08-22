@@ -1245,7 +1245,7 @@ window.executeChronosBacktest = async function(programId, isGroup = false) {
   
   const onBacktestEvent = (e) => {
     const el = document.getElementById("backtestLiveStatus");
-    if (el) el.innerText = e.detail.message;
+    if (el) el.innerText = typeof e.detail.message === "object" ? `${e.detail.message.text} (${e.detail.message.progress}%)` : e.detail.message;
   };
   window.addEventListener("ws_backtest_event", onBacktestEvent);
   
@@ -1263,6 +1263,19 @@ window.executeChronosBacktest = async function(programId, isGroup = false) {
     const pnlSign = res.total_pnl > 0 ? "+" : "";
     const pnlPercent = (res.total_pnl / capital) * 100;
     
+    let maxDrawdown = 0;
+    let peak = capital;
+    let currentCapital = capital;
+    if (res.trades) {
+        for (const t of res.trades) {
+            currentCapital += t.pnl;
+            if (currentCapital > peak) peak = currentCapital;
+            const drawDown = peak - currentCapital;
+            if (drawDown > maxDrawdown) maxDrawdown = drawDown;
+        }
+    }
+    const mddPercent = (maxDrawdown / capital) * 100;
+    
     document.getElementById("backtestResults").innerHTML = `
       <div class="grid grid-cols-2 gap-3 mt-2">
         <div class="p-4 border border-slate-200 rounded-xl bg-slate-50 text-center shadow-sm">
@@ -1276,6 +1289,10 @@ window.executeChronosBacktest = async function(programId, isGroup = false) {
              <span class="text-sm opacity-80 ml-1">(${pnlSign}${pnlPercent.toFixed(2)}%)</span>
            </div>
         </div>
+        <div class="col-span-2 p-4 border border-rose-100 rounded-xl bg-rose-50 text-center shadow-sm mt-1">
+           <div class="text-xs font-medium text-rose-500 mb-1">Max Draw-down</div>
+           <div class="text-2xl font-bold text-rose-700">₹${maxDrawdown.toFixed(2)} <span class="text-sm font-normal">(${mddPercent.toFixed(2)}%)</span></div>
+        </div>
         <div class="col-span-2 p-5 border border-blue-100 rounded-xl bg-blue-50/50 text-center shadow-sm mt-1 flex flex-row items-center justify-center gap-8">
            <div>
                <div class="text-xs font-medium text-blue-500 mb-1">Simulated Duration</div>
@@ -1288,8 +1305,51 @@ window.executeChronosBacktest = async function(programId, isGroup = false) {
            </div>
         </div>
       </div>
-      <button type="button" onclick="hideProgramDialog()" class="relative inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 w-full mt-2">Close</button>
+      </div>
+      <div id="backtestLogsContainer" class="hidden mt-4 pt-4 border-t border-slate-200">
+        <div class="flex justify-between items-center mb-2">
+            <div class="text-sm font-semibold text-slate-700">Detailed Trades Log</div>
+            <button type="button" onclick="exportBacktestTradesCsv()" class="text-xs text-blue-600 hover:underline">Export CSV</button>
+        </div>
+        <div class="max-h-64 overflow-y-auto border border-slate-200 rounded-lg bg-slate-50 text-[11px] p-0">
+          <table class="w-full text-left border-collapse">
+            <thead class="bg-slate-100 border-b border-slate-200 text-slate-500 sticky top-0">
+              <tr>
+                <th class="p-2 font-medium">Entry</th>
+                <th class="p-2 font-medium">Exit</th>
+                <th class="p-2 font-medium">Trade</th>
+                <th class="p-2 font-medium">Script(s)</th>
+                <th class="p-2 font-medium text-right">Capital (₹)</th>
+                <th class="p-2 font-medium text-right">PnL (₹)</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 font-mono">
+              ${res.trades ? res.trades.map(t => {
+                  const entryTime = new Date(t.entry_ts * 1000).toLocaleString('en-IN', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+                  const exitTime = new Date(t.exit_ts * 1000).toLocaleString('en-IN', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+                  const tradeStr = t.signal_leg ? `${t.trade_type.toUpperCase()} ${t.signal_leg}` : `${t.trade_type.toUpperCase()} STRADDLE`;
+                  const pnlClass = t.pnl >= 0 ? 'text-green-600' : 'text-red-600';
+                  const scriptStr = t.signal_leg === 'CE' ? t.ce_id : (t.signal_leg === 'PE' ? t.pe_id : `${t.ce_id} / ${t.pe_id}`);
+                  return `<tr>
+                    <td class="p-2 text-slate-600">${entryTime}</td>
+                    <td class="p-2 text-slate-600">${exitTime}</td>
+                    <td class="p-2 text-slate-800">${tradeStr}</td>
+                    <td class="p-2 text-slate-500">${scriptStr}</td>
+                    <td class="p-2 text-slate-700 text-right">${t.capital_allocated.toFixed(2)}</td>
+                    <td class="p-2 ${pnlClass} text-right font-semibold">${t.pnl.toFixed(2)}</td>
+                  </tr>`;
+              }).join("") : "<tr><td colspan='6' class='p-3 text-center text-slate-400 italic'>No trades recorded.</td></tr>"}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button type="button" onclick="document.getElementById('backtestLogsContainer').classList.toggle('hidden')" class="relative inline-flex flex-1 items-center justify-center gap-1.5 h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">View Detailed Trades</button>
+        <button type="button" onclick="hideProgramDialog()" class="relative inline-flex flex-1 items-center justify-center gap-1.5 h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">Close</button>
+      </div>
     `;
+    window.lastBacktestTrades = res.trades || [];
+
     
   } catch (e) {
     document.getElementById("backtestLoading").classList.add("hidden");
@@ -1345,13 +1405,14 @@ function renderSentinelGroups() {
     }
 
     return `
-    <div class="bg-white border border-slate-200 shadow-sm rounded-xl p-5 mb-2">
+    <div class="${sg.mode === 'paper' || !sg.mode ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'} border shadow-sm rounded-xl p-5 mb-2">
       <div class="flex items-start justify-between">
         <div>
           <div class="text-base font-medium text-slate-900">${sg.name}</div>
           <div class="text-xs text-slate-400 mt-0.5">Index: ${sg.index_id} · Capital/Leg: ${sg.capital_per_leg || 'N/A'} · Sizing: ${sg.sizing_mode}</div>
         </div>
         <span class="shrink-0 flex items-center gap-1.5">
+          ${(sg.mode === 'paper' || !sg.mode) ? `<span class="inline-flex items-center h-6 px-3 rounded-[0.3rem] text-[11px] font-medium uppercase tracking-wide border shadow-sm bg-amber-100 text-amber-800 border-amber-300">Paper</span>` : ""}
           <span class="inline-flex items-center h-6 px-3 rounded-[0.3rem] text-[11px] font-medium uppercase tracking-wide border shadow-sm ${statusClass}">${statusLabel}</span>
         </span>
       </div>
@@ -1450,6 +1511,15 @@ function sentinelGroupFormHtml(sg) {
         </select>
       </div>
       <div><label class="field-label">Capital (₹)</label><input name="capital_per_leg" type="number" min="1000" step="any" value="${sg.capital_per_leg || 100000}" class="field-input" /></div>
+      <div><label class="field-label">Execution Mode</label>
+        <select name="mode" class="js-enhance-select field-input">
+          <option value="paper" ${sg.mode === "paper" || !sg.mode ? "selected" : ""}>Paper</option>
+          <option value="live" ${sg.mode === "live" ? "selected" : ""}>Live</option>
+        </select>
+      </div>
+      <div><label class="field-label">Min DTE (Working Days)</label>
+        <input name="min_working_days_to_expiry" type="number" min="0" step="1" value="${sg.min_working_days_to_expiry !== undefined ? sg.min_working_days_to_expiry : 2}" class="field-input" />
+      </div>
     </div>
     
     <div class="flex justify-end gap-3 pt-4 border-t border-slate-200 mt-2">
@@ -1469,7 +1539,9 @@ async function submitSentinelGroupForm(id) {
     name: fd.get("name"),
     index_id: fd.get("index_id"),
     sizing_mode: fd.get("sizing_mode"),
-    capital_per_leg: parseFloat(fd.get("capital_per_leg"))
+    capital_per_leg: parseFloat(fd.get("capital_per_leg")),
+    min_working_days_to_expiry: parseInt(fd.get("min_working_days_to_expiry")) || 0,
+    mode: fd.get("mode") || "paper"
   };
 
   try {
@@ -1483,3 +1555,34 @@ async function submitSentinelGroupForm(id) {
     toast("Failed to save: " + e.message, "error"); 
   }
 }
+
+window.exportBacktestTradesCsv = function() {
+    if (!window.lastBacktestTrades || window.lastBacktestTrades.length === 0) {
+        toast("No trades to export", "error");
+        return;
+    }
+    const headers = ["Entry Time", "Exit Time", "Trade Type", "Script", "Capital Deployed", "PnL", "Close Reason"];
+    const rows = window.lastBacktestTrades.map(t => {
+        const entryTime = new Date(t.entry_ts * 1000).toLocaleString('en-IN').replace(/,/g, '');
+        const exitTime = new Date(t.exit_ts * 1000).toLocaleString('en-IN').replace(/,/g, '');
+        const tradeStr = t.signal_leg ? `${t.trade_type.toUpperCase()} ${t.signal_leg}` : `${t.trade_type.toUpperCase()} STRADDLE`;
+        const scriptStr = t.signal_leg === 'CE' ? t.ce_id : (t.signal_leg === 'PE' ? t.pe_id : `${t.ce_id} / ${t.pe_id}`);
+        return [
+            entryTime,
+            exitTime,
+            tradeStr,
+            scriptStr,
+            t.capital_allocated.toFixed(2),
+            t.pnl.toFixed(2),
+            t.close_reason || ""
+        ];
+    });
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "chronos_backtest_trades.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+};

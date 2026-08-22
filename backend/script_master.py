@@ -119,6 +119,16 @@ class ScriptMaster:
         redownloads groups if it's actually changed (or force=True, or we
         have no cache yet). Safe to call on every app startup."""
         cached_version = self._load_cached_version()
+        idx_path = self._cache_path("Index")
+        
+        # Tradejini API currently always returns isUpdated=True for some reason.
+        # To avoid redownloading on every startup, check if we already downloaded it today.
+        if not force and idx_path.exists():
+            mod_time = datetime.fromtimestamp(idx_path.stat().st_mtime).date()
+            if mod_time == date.today():
+                log.info("Scrip master already downloaded today -- using cache.")
+                self._load_from_cache_only()
+                return
         try:
             resp = await self.client.get_scrip_groups(cached_version)
         except Exception as e:
