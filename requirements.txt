@@ -10,3 +10,5 @@ python-dotenv==1.2.2
 # package is ~350KB and makes backend/clock.py work identically everywhere,
 # regardless of what the host OS happens to provide.
 tzdata==2026.3
+numpy==2.5.2
+scipy==1.18.1

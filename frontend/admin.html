@@ -25,6 +25,11 @@
   </a>
   <h1 class="text-sm font-medium text-slate-500 ml-2">Admin</h1>
   <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
+    <button type="button" onclick="openSentinelModal()" id="sentinelNavBtn" class="relative inline-flex items-center gap-1.5 h-8 px-3 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-500 hover:text-slate-700 transition-colors">
+      <span class="material-symbols-outlined !text-lg">shield_person</span>
+      <span id="sentinelNavLabel">Sentinel</span>
+    </button>
+
     <button type="button" onclick="logout()" title="Sign out" class="relative inline-flex items-center justify-center w-8 h-8 rounded-[0.3rem] border border-slate-200 bg-white shadow-sm text-slate-400 hover:text-red-600"><span class="material-symbols-outlined !text-lg">logout</span></button>
   </div>
 </nav>
@@ -101,5 +106,70 @@
 
 <script src="/static/app.js?v=1787500000"></script>
 <script src="/static/admin.js?v=1787500000"></script>
+<!-- Sentinel Config Modal -->
+<div id="sentinelModal" class="hidden fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[90vh]">
+    <div class="flex items-center justify-between p-4 border-b border-slate-100 bg-slate-50/50">
+      <h3 class="text-base font-semibold flex items-center gap-2 text-slate-800">
+        <span class="material-symbols-outlined !text-xl text-blue-600">shield_person</span> Sentinel Settings
+      </h3>
+      <button onclick="closeSentinelModal()" class="w-8 h-8 flex items-center justify-center rounded-[0.3rem] text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
+        <span class="material-symbols-outlined !text-xl">close</span>
+      </button>
+    </div>
+    
+    <div class="p-5 overflow-y-auto">
+      <div id="sentinelDiffView" class="hidden mb-6 bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm">
+        <div class="flex items-center gap-2 mb-2 text-amber-700 font-medium">
+          <span class="material-symbols-outlined !text-lg">warning</span> Running Modified Configuration
+        </div>
+        <p class="text-slate-500 mb-3 text-xs">The current active settings differ from the factory defaults. This alters how Sentinel identifies market regimes.</p>
+        <div class="grid grid-cols-3 gap-2 font-medium text-slate-400 text-xs uppercase tracking-wide border-b border-slate-200 pb-2 mb-2">
+          <div>Parameter</div>
+          <div>Default</div>
+          <div>Active</div>
+        </div>
+        <div id="sentinelDiffLines" class="space-y-1"></div>
+      </div>
+
+      <form id="sentinelForm" onsubmit="saveSentinelConfig(event)">
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">ADX Period</label>
+            <input type="number" id="s_adx_period" class="w-full h-10 px-3 border border-slate-300 rounded-[0.3rem] text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500" required>
+            <p class="text-xs text-slate-500 mt-1">Lookback period for ADX calculation.</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">ADX Directional Threshold</label>
+            <input type="number" step="0.1" id="s_adx_threshold" class="w-full h-10 px-3 border border-slate-300 rounded-[0.3rem] text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500" required>
+            <p class="text-xs text-slate-500 mt-1">ADX value above which market is considered DIRECTIONAL.</p>
+          </div>
+          <div class="border-t border-slate-100 pt-4 mt-2">
+            <label class="block text-sm font-medium text-slate-700 mb-1">ATR Period</label>
+            <input type="number" id="s_atr_period" class="w-full h-10 px-3 border border-slate-300 rounded-[0.3rem] text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500" required>
+            <p class="text-xs text-slate-500 mt-1">Lookback period for ATR (Average True Range).</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">ATR Volatility Multiplier</label>
+            <input type="number" step="0.1" id="s_atr_multiplier" class="w-full h-10 px-3 border border-slate-300 rounded-[0.3rem] text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500" required>
+            <p class="text-xs text-slate-500 mt-1">Multiplier over average ATR to trigger VOLATILE regime.</p>
+          </div>
+        </div>
+        <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+          <button type="button" onclick="resetSentinelConfig()" class="h-10 px-4 rounded-[0.3rem] text-sm font-medium text-red-600 hover:bg-red-50 transition-colors mr-auto hidden" id="sentinelResetBtn">
+            Reset Defaults
+          </button>
+          <button type="button" onclick="closeSentinelModal()" class="h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors">
+            Cancel
+          </button>
+          <button type="submit" class="h-10 px-6 rounded-[0.3rem] text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 shadow-sm transition-colors flex items-center gap-2">
+            <span class="material-symbols-outlined !text-lg">save</span> Save
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

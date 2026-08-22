@@ -75,6 +75,7 @@ class ProgramManager:
         self.script_master = script_master
         self._programs: dict[str, dict] = {}   # program_id -> {"config": {...}, "runtime": {...}, "logs": [...]}
         self._risk_groups: dict[str, dict] = {}  # risk_group_id -> {"risk_group_id", "name", "daily_loss_amount_override"}
+        self._sentinel_groups: dict[str, dict] = {}  # sentinel_group_id -> dict
         self._holidays: set = set()
         self._lock = asyncio.Lock()
         self.last_tick_at: datetime | None = None  # set only on a SUCCESSFUL tick() completion -- if this
@@ -134,9 +135,12 @@ class ProgramManager:
             self._programs[p["config"]["program_id"]] = p
         for g in store.list_risk_groups():
             self._risk_groups[g["risk_group_id"]] = g
+        for sg in store.list_sentinel_groups():
+            self._sentinel_groups[sg["sentinel_group_id"]] = sg
         self._backfill_missing_risk_groups()
         self._holidays = load_market_holidays()
-        log.info("Loaded %d Program(s), %d Risk Group(s) from disk.", len(self._programs), len(self._risk_groups))
+        log.info("Loaded %d Program(s), %d Risk Group(s), %d Sentinel Group(s) from disk.", 
+                 len(self._programs), len(self._risk_groups), len(self._sentinel_groups))
 
     def _backfill_missing_risk_groups(self):
         """A Program saved before Risk Group existed has no risk_group_id.
@@ -214,6 +218,75 @@ class ProgramManager:
                               f"({', '.join(members)}); reassign them first")
         del self._risk_groups[risk_group_id]
         store.delete_risk_group(risk_group_id)
+
+    # ----------------------------------------------------- sentinel groups --
+
+    def list_sentinel_groups(self) -> list:
+        return sorted(self._sentinel_groups.values(), key=lambda g: g["name"].lower())
+
+    def get_sentinel_group(self, sentinel_group_id: str):
+        return self._sentinel_groups.get(sentinel_group_id)
+
+    def create_sentinel_group(self, config_dict: dict) -> dict:
+        from .models import SentinelGroupConfig
+        cfg = SentinelGroupConfig.from_dict(config_dict)
+        group = dataclasses.asdict(cfg)
+        self._sentinel_groups[cfg.sentinel_group_id] = group
+        store.save_sentinel_group(group)
+        self._sync_sentinel_children(cfg)
+        return group
+
+    def update_sentinel_group(self, sentinel_group_id: str, config_dict: dict) -> dict:
+        if sentinel_group_id not in self._sentinel_groups:
+            raise ValueError("Sentinel Group not found")
+        from .models import SentinelGroupConfig
+        config_dict = dict(config_dict)
+        config_dict["sentinel_group_id"] = sentinel_group_id
+        cfg = SentinelGroupConfig.from_dict(config_dict)
+        group = dataclasses.asdict(cfg)
+        self._sentinel_groups[sentinel_group_id] = group
+        store.save_sentinel_group(group)
+        self._sync_sentinel_children(cfg)
+        return group
+
+    def delete_sentinel_group(self, sentinel_group_id: str):
+        if sentinel_group_id not in self._sentinel_groups:
+            raise ValueError("Sentinel Group not found")
+        # Find all children and delete them
+        children_ids = [p["config"]["program_id"] for p in self._programs.values() 
+                        if p["config"].get("sentinel_group_id") == sentinel_group_id and p["config"].get("is_auto_generated")]
+        for cid in children_ids:
+            self.delete_program(cid)
+            
+        del self._sentinel_groups[sentinel_group_id]
+        store.delete_sentinel_group(sentinel_group_id)
+        
+    def _sync_sentinel_children(self, cfg):
+        # Auto-generates or updates the 3 child programs based on the Sentinel parent config
+        for regime in ["SIDEWAYS", "DIRECTIONAL", "VOLATILE"]:
+            program_id = f"sentinel_{cfg.sentinel_group_id}_{regime}"
+            
+            # Build child program dict. Configuration (stops, targets, entry_mode) 
+            # will be dynamically populated by the Sentinel Orchestrator.
+            child_dict = {
+                "program_id": program_id,
+                "name": f"{cfg.name} [{regime}]",
+                "index_id": cfg.index_id,
+                "risk_group_id": cfg.risk_group_id,
+                "broker_id": cfg.broker_id,
+                "sizing_mode": cfg.sizing_mode,
+                "capital_per_leg": cfg.capital_per_leg,
+                "execution_mode": "autonomous_sentinel", # Tag as autonomous
+                "target_regime": regime,
+                "sentinel_group_id": cfg.sentinel_group_id,
+                "is_auto_generated": True
+            }
+            
+            # If exists, update; else create
+            if program_id in self._programs:
+                self.update_program(program_id, child_dict)
+            else:
+                self.create_program(child_dict)
 
     # ---------------------------------------------------------- public API --
 
@@ -348,6 +421,61 @@ class ProgramManager:
         store.save_program(program)
         self._log(program, f"Stopped and flattened by user.{' Close requested on open leg(s).' if closed_any else ' No open legs to close.'}")
         return program
+
+    async def flatten_program_for_orchestration(self, program_id: str) -> dict:
+        """Called by SentinelOrchestrator during a regime shift. Flattens the open 
+        cycle but leaves the program running (does not set STOPPED_BY_USER) so it 
+        is ready to deploy again when its regime returns."""
+        program = self._require(program_id)
+        cycle_id = program["runtime"].get("active_cycle_id")
+        om = self._order_manager_for(program["config"])
+        closed_any = False
+        if cycle_id:
+            for o in om.get_orders_by_cycle(cycle_id):
+                if o["status"] not in ("closed", "cancelled", "entry_rejected"):
+                    try:
+                        await om.request_close(o["order_id"], reason="program_flatten")
+                        closed_any = True
+                    except Exception as e:
+                        log.error("Orchestration flatten failed for order %s: %s", o["order_id"], e)
+                        failure_log.log_failure(category="program_flatten_failed", order_id=o["order_id"], program_id=program_id, message=str(e))
+        store.save_program(program)
+        if closed_any:
+            self._log(program, "Flattened by Sentinel Orchestrator due to regime shift. Close requested on open leg(s).")
+        return program
+
+    async def force_start_cycle(self, program_id: str) -> bool:
+        """Called by SentinelOrchestrator to forcefully enter a trade bypassing 
+        schedule clocks. It still obeys all safety limits (daily loss, etc) and entry gates."""
+        program = self._require(program_id)
+        
+        if program.get("archived"):
+            log.info(f"force_start_cycle ignored: {program_id} is archived.")
+            return False
+            
+        now = clock.now()
+        rt = program["runtime"]
+        cfg = program["config"]
+        
+        # Check safeguards (we still want to respect daily loss limits, etc.)
+        portfolio_pnl = sum(p["runtime"]["daily_realized_pnl"] for p in self._programs.values())
+        portfolio_cap = self._get_portfolio_cap()
+        
+        allowed, reason = sg.can_start_new_cycle(
+            program_status=rt["status"], active_cycle_id=rt.get("active_cycle_id"),
+            cooldown_until=rt.get("cooldown_until"), consecutive_losses=rt.get("consecutive_losses", 0),
+            daily_realized_pnl=rt.get("daily_realized_pnl", 0), now=now,
+            consecutive_loss_limit=cfg["safeguards"]["consecutive_loss_limit"],
+            daily_loss_amount=cfg["safeguards"]["daily_loss_amount"],
+            portfolio_daily_pnl=portfolio_pnl, portfolio_daily_loss_cap=portfolio_cap,
+        )
+        if not allowed:
+            self._log(program, f"Orchestrator force start blocked by safeguards: {reason}")
+            return False
+            
+        await self._start_new_cycle(program, now)
+        # return True if cycle successfully started (active_cycle_id was set)
+        return program["runtime"].get("active_cycle_id") is not None
 
     async def start_manual_single_leg_cycle(self, program_id: str, leg: str, indicators=None) -> dict:
         program = self._require(program_id)
@@ -622,11 +750,7 @@ class ProgramManager:
                 # Portfolio; a Program with no group (shouldn't normally happen post-backfill,
                 # but handled defensively) counts by its own cap directly so it's never silently
                 # excluded from the portfolio ceiling
-                ungrouped_caps = [p["config"]["safeguards"]["daily_loss_amount"] for p in self._programs.values()
-                                   if not p["config"].get("risk_group_id")]
-                portfolio_cap = sg.effective_group_daily_loss_cap(
-                    list(risk_group_caps.values()) + ungrouped_caps, portfolio_cfg.get("daily_loss_amount_override")
-                )
+                portfolio_cap = self._get_portfolio_cap()
                 newly_halted = sg.apply_portfolio_halt_if_needed(
                     runtime_map, portfolio_daily_pnl=portfolio_pnl, portfolio_cap=portfolio_cap
                 )
@@ -1214,7 +1338,7 @@ class ProgramManager:
             return
 
         portfolio_pnl = sum(p["runtime"].get("daily_realized_pnl", 0.0) for p in self._programs.values())
-        portfolio_cap = getattr(config, "PORTFOLIO_DAILY_LOSS_AMOUNT", 100000.0)
+        portfolio_cap = self._get_portfolio_cap()
 
         allowed, reason = sg.can_start_new_cycle(
             program_status=rt["status"], active_cycle_id=rt["active_cycle_id"],
@@ -1361,4 +1485,21 @@ class ProgramManager:
             "manual_entry_leg": leg_direction, # Reusing manual_entry_leg so it knows it's a 1-leg cycle
         }
         store.save_program(program)
+
+    def _get_portfolio_cap(self) -> float:
+        """Computes the current effective portfolio loss cap, taking into account all risk groups
+        and portfolio-level overrides."""
+        portfolio_cfg = store.load_portfolio_safeguards()
+        if not portfolio_cfg.get("enabled", True):
+            return float("inf")
+            
+        group_caps = []
+        for group_id, group in self._risk_groups.items():
+            member_caps = [p["config"]["safeguards"]["daily_loss_amount"] for p in self._programs.values() if p["config"].get("risk_group_id") == group_id]
+            if member_caps:
+                group_caps.append(sg.effective_group_daily_loss_cap(member_caps, group.get("daily_loss_amount_override")))
+                
+        ungrouped_caps = [p["config"]["safeguards"]["daily_loss_amount"] for p in self._programs.values() if not p["config"].get("risk_group_id")]
+        
+        return sg.effective_group_daily_loss_cap(group_caps + ungrouped_caps, portfolio_cfg.get("daily_loss_amount_override"))
 

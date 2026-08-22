@@ -412,11 +412,14 @@ class ProgramConfig:
                                               # anything yet; no Super Program entity exists. Every Program
                                               # created today gets None and stays a fully independent
                                               # Program in every respect.
+    sentinel_group_id: Optional[str] = None # Groups mutually exclusive programs together. The SentinelOrchestrator
+                                              # manages capital rotation among programs sharing this ID during regime shifts.
     entry_mode: str = "auto_pair"             # "auto_pair" | "manual_single_leg" | "signal_single_leg"
     execution_mode: str = "manual_config"     # "manual_config" | "sentinel" -- whether to explicitly follow manual 
                                               # config or surrender entry/exit authority to the Regime Classifier (Iteration 1.1)
     target_regime: str = "SIDEWAYS"           # "SIDEWAYS" | "DIRECTIONAL" | "VOLATILE" | "ANY" -- what regime this 
                                               # program is built for (used when execution_mode == "sentinel")
+    is_auto_generated: bool = False           # True if generated automatically by a Sentinel Parent group
     orb_duration_minutes: int = 15            # ORB tracking window duration in minutes (when entry_mode == "signal_single_leg")
     min_working_days_to_expiry: int = 2
     lots_per_leg: int = 1     # used when sizing_mode == "lots" (both legs always equal)
@@ -497,6 +500,10 @@ class ProgramConfig:
             raise ValidationError("orb_duration_minutes must be > 0")
         broker_id = (d.get("broker_id") or "tradejini").strip()
         super_program_id = d.get("super_program_id") or None
+        sentinel_group_id = (d.get("sentinel_group_id") or "").strip() or None
+        execution_mode = (d.get("execution_mode") or "manual_config").strip()
+        target_regime = (d.get("target_regime") or "SIDEWAYS").strip()
+        is_auto_generated = bool(d.get("is_auto_generated", False))
         sizing_mode = d.get("sizing_mode") or "lots"
         if sizing_mode not in ("lots", "capital"):
             raise ValidationError('sizing_mode must be "lots" or "capital"')
@@ -528,6 +535,10 @@ class ProgramConfig:
             orb_duration_minutes=orb_duration,
             broker_id=broker_id,
             super_program_id=super_program_id,
+            sentinel_group_id=sentinel_group_id,
+            execution_mode=execution_mode,
+            target_regime=target_regime,
+            is_auto_generated=is_auto_generated,
             min_working_days_to_expiry=min_wd,
             lots_per_leg=lots,
             sizing_mode=sizing_mode,
@@ -577,6 +588,46 @@ class RiskGroupConfig:
             risk_group_id=risk_group_id,
             name=name,
             daily_loss_amount_override=float(override) if override not in (None, "") else None,
+        )
+
+
+@dataclass
+class SentinelGroupConfig:
+    """A macro-program that spawns 3 mutually-exclusive child programs
+    (Sideways, Directional, Volatile) and coordinates capital rotation
+    among them based on the active market regime."""
+    sentinel_group_id: str
+    name: str
+    index_id: str
+    risk_group_id: Optional[str] = None
+    broker_id: str = "tradejini"
+    capital_per_leg: Optional[float] = None
+    sizing_mode: str = "capital"
+    is_active: bool = False
+    
+    @classmethod
+    def from_dict(cls, d: dict) -> "SentinelGroupConfig":
+        sentinel_group_id = (d.get("sentinel_group_id") or "").strip() or uuid.uuid4().hex[:12]
+        name = (d.get("name") or "").strip()
+        if not name:
+            raise ValidationError("Sentinel Group name is required")
+            
+        sizing_mode = d.get("sizing_mode") or "capital"
+        capital_per_leg = d.get("capital_per_leg")
+        if capital_per_leg is not None and capital_per_leg != "":
+            capital_per_leg = float(capital_per_leg)
+        else:
+            capital_per_leg = None
+            
+        return cls(
+            sentinel_group_id=sentinel_group_id,
+            name=name,
+            index_id=d.get("index_id") or "IDX_NIFTY_NSE",
+            risk_group_id=d.get("risk_group_id"),
+            broker_id=d.get("broker_id") or "tradejini",
+            capital_per_leg=capital_per_leg,
+            sizing_mode=sizing_mode,
+            is_active=bool(d.get("is_active"))
         )
 
 
@@ -680,4 +731,23 @@ class CreateOrderRequest:
             entry_trig_price=entry_trig_price,
             exit_mode=exit_mode,
             lot_size=lot_size,
+        )
+
+# ----------------------------------------------------------- sentinel config --
+
+@dataclass
+class SentinelConfig:
+    adx_period: int = 14
+    adx_directional_threshold: float = 25.0
+    atr_period: int = 14
+    atr_volatile_multiplier: float = 1.5
+    
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "SentinelConfig":
+        d = d or {}
+        return cls(
+            adx_period=int(d.get("adx_period", 14)),
+            adx_directional_threshold=float(d.get("adx_directional_threshold", 25.0)),
+            atr_period=int(d.get("atr_period", 14)),
+            atr_volatile_multiplier=float(d.get("atr_volatile_multiplier", 1.5)),
         )

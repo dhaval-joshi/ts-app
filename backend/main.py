@@ -15,7 +15,7 @@ from . import heartbeat
 from .paper_broker import PaperBrokerClient
 
 from . import config, store, failure_log, factsheet, broker_reconcile
-from .models import CreateOrderRequest, StrategyConfig, ValidationError, PortfolioSafeguards, as_dict
+from .models import CreateOrderRequest, StrategyConfig, ValidationError, PortfolioSafeguards, SentinelConfig, as_dict
 from .tradejini_client import TradejiniClient, TradejiniAuthError
 from .stream_manager import StreamManager
 from .nxtradstream import GREEKS
@@ -26,6 +26,7 @@ from .indicators import IndicatorService
 from .signal_engine import SignalEngine
 
 from .regime_classifier import RegimeClassifier
+from . import sentinel_orchestrator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("tradejini.main")
@@ -82,6 +83,9 @@ async def lifespan(app):
     await manager.load_from_disk()
     await paper_manager.load_from_disk()
     await programs.load_from_disk()
+    
+    regime_classifier = RegimeClassifier(client)
+    sentinel_orchestrator.init_orchestrator(programs, client, regime_classifier)
 
     log.info("Connecting to Tradejini at %s ...", config.REST_BASE_URL)
     if not await _try_login_and_start_stream():
@@ -118,6 +122,7 @@ async def lifespan(app):
     asyncio.create_task(stream.periodic_resubscribe_loop())  # self-healing safety net for the live-price
                                                                 # subscription -- see its docstring
     asyncio.create_task(_archive_eod_data_loop())
+    asyncio.create_task(sentinel_orchestrator.orchestrator_loop())
 
     yield
 
@@ -539,7 +544,10 @@ async def api_list_indices(request):
 
 
 async def api_list_programs(request):
-    return JSONResponse(programs.list_programs())
+    progs = programs.list_programs()
+    # Filter out auto-generated sentinel children from the standard list
+    progs = [p for p in progs if not p["config"].get("is_auto_generated")]
+    return JSONResponse(progs)
 
 
 async def api_get_program(request):
@@ -644,10 +652,131 @@ async def api_manual_entry(request):
         return JSONResponse({"detail": str(e)}, status_code=400)
     except Exception as e:
         log.exception("manual entry failed")
-        return JSONResponse({"detail": str(e)}, status_code=500)
+        return JSONResponse({"detail": str(e)}, status_code=404)
     return JSONResponse(program)
 
 
+# ------------------------------------------------------------ sentinel --
+
+async def api_get_sentinel_config(request):
+    data = store.load_sentinel_config()
+    default_config = as_dict(SentinelConfig())
+    return JSONResponse({
+        "default": default_config,
+        "modified": data or default_config,
+        "is_modified": bool(data and data != default_config)
+    })
+
+async def api_update_sentinel_config(request):
+    body = await request.json()
+    store.save_sentinel_config(body)
+    return JSONResponse(store.load_sentinel_config())
+
+
+async def api_reset_sentinel_config(request):
+    store.save_sentinel_config({})
+    return JSONResponse(store.load_sentinel_config())
+
+# ----------------------------------------------------- sentinel groups --
+
+async def api_list_sentinel_groups(request):
+    sgs = programs.list_sentinel_groups()
+    progs = programs.list_programs()
+    
+    for sg in sgs:
+        sg_id = sg["sentinel_group_id"]
+        # Find all auto-generated children for this group
+        sg["children"] = [p for p in progs if p["config"].get("sentinel_group_id") == sg_id and p["config"].get("is_auto_generated")]
+        
+    return JSONResponse(sgs)
+
+async def api_create_sentinel_group(request):
+    body = await request.json()
+    try:
+        sg = programs.create_sentinel_group(body)
+    except ValidationError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    return JSONResponse(sg)
+
+async def api_update_sentinel_group(request):
+    body = await request.json()
+    try:
+        sg = programs.update_sentinel_group(request.path_params["sg_id"], body)
+    except ValidationError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    except ValueError as e:
+        return JSONResponse({"detail": str(e)}, status_code=404)
+    return JSONResponse(sg)
+
+async def api_delete_sentinel_group(request):
+    try:
+        programs.delete_sentinel_group(request.path_params["sg_id"])
+    except ValueError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+async def api_start_sentinel_group(request):
+    sg_id = request.path_params["sg_id"]
+    sg = programs.get_sentinel_group(sg_id)
+    if not sg:
+        return JSONResponse({"detail": "Sentinel Group not found"}, status_code=404)
+    sg["is_active"] = True
+    programs.update_sentinel_group(sg_id, sg)
+    return JSONResponse(sg)
+
+async def api_stop_sentinel_group(request):
+    sg_id = request.path_params["sg_id"]
+    sg = programs.get_sentinel_group(sg_id)
+    if not sg:
+        return JSONResponse({"detail": "Sentinel Group not found"}, status_code=404)
+    sg["is_active"] = False
+    programs.update_sentinel_group(sg_id, sg)
+    return JSONResponse(sg)
+
+async def api_flatten_sentinel_group(request):
+    sg_id = request.path_params["sg_id"]
+    sg = programs.get_sentinel_group(sg_id)
+    if not sg:
+        return JSONResponse({"detail": "Sentinel Group not found"}, status_code=404)
+    
+    # 1. Stop the orchestrator
+    sg["is_active"] = False
+    programs.update_sentinel_group(sg_id, sg)
+    
+    # 2. Flatten all auto-generated children
+    for p in programs.list_programs():
+        # (Using internal dict bypasses the is_auto_generated filter on the public list endpoint)
+        pass 
+        
+    for p in programs._programs.values():
+        if p["config"].get("sentinel_group_id") == sg_id and p["config"].get("is_auto_generated"):
+            try:
+                programs.flatten_program(p["config"]["program_id"])
+            except Exception as e:
+                log.exception(f"Failed to flatten child program {p['config']['program_id']}")
+                
+    return JSONResponse(sg)
+
+
+# ----------------------------------------------------------- backtesting --
+
+async def api_run_backtest(request):
+    from .chronos import ChronosEngine
+    body = await request.json()
+    program_id = request.path_params["program_id"] # could also be a group_id
+    days_back = int(body.get("days", 30))
+    capital = float(body.get("capital", 100000.0))
+    is_group = bool(body.get("is_group", False))
+    
+    engine = ChronosEngine(client, script_master)
+    try:
+        result = await engine.run_backtest(program_id, days_back, capital, is_group=is_group)
+        if "error" in result:
+            return JSONResponse({"detail": result["error"]}, status_code=400)
+        return JSONResponse(result)
+    except Exception as e:
+        log.exception("Chronos backtest failed")
+        return JSONResponse({"detail": str(e)}, status_code=500)
 
 
 # ---------------------------------------------------------------- risk groups --
@@ -885,6 +1014,18 @@ routes = [
     Route("/api/programs/{program_id}/archive", api_archive_program, methods=["POST"]),
     Route("/api/programs/{program_id}/unarchive", api_unarchive_program, methods=["POST"]),
     Route("/api/programs/{program_id}/manual-entry", api_manual_entry, methods=["POST"]),
+    
+    Route("/api/sentinel-groups", api_list_sentinel_groups, methods=["GET"]),
+    Route("/api/sentinel-groups", api_create_sentinel_group, methods=["POST"]),
+    Route("/api/sentinel-groups/{sg_id}", api_update_sentinel_group, methods=["PUT"]),
+    Route("/api/sentinel-groups/{sg_id}", api_delete_sentinel_group, methods=["DELETE"]),
+    Route("/api/sentinel-groups/{sg_id}/start", api_start_sentinel_group, methods=["POST"]),
+    Route("/api/sentinel-groups/{sg_id}/stop", api_stop_sentinel_group, methods=["POST"]),
+    Route("/api/sentinel-groups/{sg_id}/flatten", api_flatten_sentinel_group, methods=["POST"]),
+    
+    Route("/api/sentinel/config", api_get_sentinel_config, methods=["GET"]),
+    Route("/api/sentinel/config", api_update_sentinel_config, methods=["PUT"]),
+    Route("/api/sentinel/config/reset", api_reset_sentinel_config, methods=["POST"]),
 
     Route("/api/risk-groups", api_list_risk_groups, methods=["GET"]),
     Route("/api/risk-groups", api_create_risk_group, methods=["POST"]),
@@ -893,6 +1034,9 @@ routes = [
     Route("/api/portfolio-safeguards", api_get_portfolio_safeguards, methods=["GET"]),
     Route("/api/portfolio-safeguards", api_save_portfolio_safeguards, methods=["POST"]),
     Route("/api/status", api_status, methods=["GET"]),
+    
+    Route("/api/backtest/run/{program_id}", api_run_backtest, methods=["POST"]),
+
     WebSocketRoute("/ws", ws_endpoint),
     Mount("/static", StaticFiles(directory=str(config.FRONTEND_DIR)), name="static"),
 ]

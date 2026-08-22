@@ -343,6 +343,9 @@
       <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-adv-tab="riskgroups" onclick="switchAdvTab('riskgroups')">
         <span class="material-symbols-outlined !text-lg">workspaces</span>Risk Groups
       </button>
+      <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-adv-tab="sentinelgroups" onclick="switchAdvTab('sentinelgroups')">
+        <span class="material-symbols-outlined !text-lg">shield_person</span>Sentinel Groups
+      </button>
       <button class="adv-tab-btn relative flex items-center gap-1.5 px-4 py-3 text-sm border-b-2 text-slate-400 border-transparent" data-adv-tab="archive" onclick="switchAdvTab('archive')">
         <span class="material-symbols-outlined !text-lg">archive</span>Archive
       </button>
@@ -388,6 +391,23 @@
         </button>
       </div>
       <div id="riskGroupList" class="flex flex-col gap-2"></div>
+    </div>
+
+    <div id="advtab-sentinelgroups" class="adv-tab-panel hidden">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h1 class="text-xl font-medium">Sentinel Groups</h1>
+          <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+            Macro-programs that automatically rotate active capital across 3 distinct sub-strategies (Sideways, Directional, Volatile) 
+            based on the live market regime. Only one sub-strategy trades at a time.
+          </p>
+        </div>
+        <button type="button" onclick="showNewSentinelGroupDialog()"
+          class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 shrink-0">
+          <span class="material-symbols-outlined !text-base">add</span>New Sentinel Group
+        </button>
+      </div>
+      <div id="sentinelGroupList" class="flex flex-col gap-4"></div>
     </div>
 
     <div id="advtab-archive" class="adv-tab-panel hidden">
@@ -614,6 +634,8 @@
     </form>
   </div>
 </div>
+
+
 
 <!-- snackbar -->
 <div id="snackbar" class="fixed left-4 right-4 sm:left-auto sm:right-4 sm:w-80 flex items-center gap-4 py-3 px-4 rounded-[0.3rem] shadow-lg text-white bg-slate-800 z-50 text-sm">

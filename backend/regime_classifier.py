@@ -145,7 +145,13 @@ class RegimeClassifier:
                 bars[-1]["low"] = min(last_bar["low"], live_ltp)
                 bars[-1]["close"] = live_ltp
 
-        period = 14
+        # Load Sentinel Config
+        config_data = store.load_sentinel_config()
+        from .models import SentinelConfig
+        s_config = SentinelConfig.from_dict(config_data)
+
+        adx_period = s_config.adx_period
+        atr_period = s_config.atr_period
         
         # Calculate TR, +DM, -DM
         tr_list, plus_dm_list, minus_dm_list = [], [], []
@@ -175,9 +181,9 @@ class RegimeClassifier:
                 res.append((res[-1] * (period - 1) + val) / period)
             return res
             
-        tr_rma = rma(tr_list, period)
-        plus_dm_rma = rma(plus_dm_list, period)
-        minus_dm_rma = rma(minus_dm_list, period)
+        tr_rma = rma(tr_list, adx_period)
+        plus_dm_rma = rma(plus_dm_list, adx_period)
+        minus_dm_rma = rma(minus_dm_list, adx_period)
         
         if not tr_rma:
             return
@@ -196,7 +202,7 @@ class RegimeClassifier:
             else:
                 dx_list.append(100 * abs(plus_di - minus_di) / di_sum)
                 
-        adx_list = rma(dx_list, period)
+        adx_list = rma(dx_list, adx_period)
         if not adx_list:
             return
             
@@ -205,14 +211,14 @@ class RegimeClassifier:
         
         # We also need VIX or ATR relative expansion to detect VOLATILE state.
         # Simple heuristic: if ATR is significantly higher than its 14-period average
-        atr_sma = sum(tr_rma[-14:]) / min(14, len(tr_rma))
-        is_volatile = current_atr > (atr_sma * 1.5)
+        atr_sma = sum(tr_rma[-atr_period:]) / min(atr_period, len(tr_rma))
+        is_volatile = current_atr > (atr_sma * s_config.atr_volatile_multiplier)
         
         old_state = self.regimes.get(symbol_id, {}).get("state", STATE_UNKNOWN)
         
         if is_volatile:
             new_state = STATE_VOLATILE
-        elif current_adx > 25:
+        elif current_adx > s_config.adx_directional_threshold:
             new_state = STATE_DIRECTIONAL
         else:
             new_state = STATE_SIDEWAYS

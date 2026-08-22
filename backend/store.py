@@ -31,6 +31,7 @@ _get_db().execute("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, archi
 _get_db().execute("CREATE TABLE IF NOT EXISTS strategies (id TEXT PRIMARY KEY, name TEXT, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS programs (id TEXT PRIMARY KEY, name TEXT, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS risk_groups (id TEXT PRIMARY KEY, name TEXT, data TEXT)")
+_get_db().execute("CREATE TABLE IF NOT EXISTS sentinel_groups (id TEXT PRIMARY KEY, name TEXT, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS factsheets (id TEXT PRIMARY KEY, type TEXT, program_id TEXT, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS reconcile_reports (id TEXT PRIMARY KEY, date TEXT, data TEXT)")
 _get_db().execute("CREATE TABLE IF NOT EXISTS signal_history (id TEXT PRIMARY KEY, data TEXT)")
@@ -183,6 +184,31 @@ def delete_risk_group(risk_group_id: str) -> None:
     conn = _get_db()
     conn.execute("DELETE FROM risk_groups WHERE id=?", (risk_group_id,))
 
+# -------------------------------------------------------- sentinel groups --
+
+def save_sentinel_group(sg: dict) -> None:
+    conn = _get_db()
+    sg_id = sg["sentinel_group_id"]
+    name = sg.get("name", "")
+    conn.execute("INSERT OR REPLACE INTO sentinel_groups (id, name, data) VALUES (?, ?, ?)",
+                 (sg_id, name, json.dumps(sg, default=str)))
+
+def load_sentinel_group(sg_id: str) -> Optional[dict]:
+    conn = _get_db()
+    row = conn.execute("SELECT data FROM sentinel_groups WHERE id=?", (sg_id,)).fetchone()
+    if row:
+        return json.loads(row[0])
+    return None
+
+def list_sentinel_groups() -> list[dict]:
+    conn = _get_db()
+    rows = conn.execute("SELECT data FROM sentinel_groups ORDER BY name ASC").fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+def delete_sentinel_group(sg_id: str) -> None:
+    conn = _get_db()
+    conn.execute("DELETE FROM sentinel_groups WHERE id=?", (sg_id,))
+
 # ------------------------------------------------------ portfolio safeguards --
 
 def load_portfolio_safeguards() -> dict:
@@ -195,6 +221,20 @@ def load_portfolio_safeguards() -> dict:
 def save_portfolio_safeguards(data: dict) -> None:
     conn = _get_db()
     conn.execute("INSERT OR REPLACE INTO singletons (id, data) VALUES ('portfolio_safeguards', ?)",
+                 (json.dumps(data, default=str),))
+
+# ------------------------------------------------------ sentinel config --
+
+def load_sentinel_config() -> dict:
+    conn = _get_db()
+    row = conn.execute("SELECT data FROM singletons WHERE id='sentinel_config'").fetchone()
+    if row:
+        return json.loads(row[0])
+    return {}
+
+def save_sentinel_config(data: dict) -> None:
+    conn = _get_db()
+    conn.execute("INSERT OR REPLACE INTO singletons (id, data) VALUES ('sentinel_config', ?)",
                  (json.dumps(data, default=str),))
 
 # ---------------------------------------------------------------- app settings --

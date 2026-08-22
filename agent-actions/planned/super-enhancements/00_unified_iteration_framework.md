@@ -17,6 +17,43 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 - **Analyst**: Real-time IVR (Implied Volatility Rank) and VWAP calculations to drive manual entry alerts.
 - **Profitability Impact (Slippage Reduction & Disaster Prevention)**: During massive volatility spikes (which is when the most profitable opportunities occur), JSON file-locking can cause milliseconds of delay, resulting in severe slippage on entries and exits. Moving to SQLite guarantees instantaneous state management. Furthermore, the Global Kill Switch and synthetic grouped stops ensure that a sudden flash-crash doesn't wipe out a month of algorithmic gains because a manual hedge was left unprotected.
 
+### Iteration 1.1 (Sentinel): Dynamic Regime Overrides
+*Codename Logic: Sentinel represents the watcher on the wall. It actively monitors market regimes (ADX/ATR) and preemptively shields capital from unfavorable conditions.*
+*Focus: Dynamic Regime Detection and Configurable Constraints.*
+- **PO**: Application-level control over market-state boundaries (Trending, Volatile, Sideways) via UI overrides.
+- **Arch**: Configuration overrides persisted via SQLite singletons (`SentinelConfig`).
+- **Data**: Real-time smoothing and period-adaptive technicals (Wilder's Smoothing).
+- **Analyst**: Smart Exits — preemptive leg squashing if market conditions abruptly shift away from the targeted regime.
+- **Profitability Impact**: By actively reading market context, Sentinel prevents the deployment of premium-selling strategies in explosive momentum environments, avoiding massive drawdowns.
+
+### Iteration 1.2 (Chronos): Native Backtesting Engine
+*Codename Logic: Chronos is the personification of time. Allows the user to bend time and replay history against the current execution engine.*
+*Focus: Simulated live execution and historical validation.*
+- **PO**: Run backtesting dynamically from the dashboard on any active program, mimicking live P&L flow.
+- **Arch**: Dedicated offline backtesting engine looping minute-by-minute over historical index data.
+- **Data**: Mathematical Greek reverse-engineering via Newton-Raphson to synthesize Implied Volatility that is missing from historical broker charts.
+- **Analyst**: Exact replication of entry gates (e.g., `iv_session_rank_gate`) and trailing stops over a historical time series.
+- **Profitability Impact (Historical Validation)**: By testing against historical ticks, you stop paying the "tuition fee" of discovering that a strategy fails in live markets. *(Note: This pulls forward the backtesting goal originally slated for Phase 2).*
+
+### Iteration 1.3 (Legion): The Sentinel Orchestrator
+*Codename Logic: A Legion is a massive, highly organized force composed of smaller, specialized units. This iteration organizes isolated programs into unified, adaptive strike forces.*
+*Focus: Dynamic Capital Rotation and Microservice Scaling.*
+- **PO**: Group independent strategies (e.g., Sideways Short Straddle, Directional Long Straddle) under a unified `sentinel_group_id`. The Orchestrator safely rotates the shared Capital Pool between them on the fly.
+- **Arch**: Dedicated `SentinelOrchestrator` runs an asynchronous state-machine (Flatten -> Await Margin Release -> Deploy).
+- **Data**: Upgraded `Chronos` engine backtests entire Sentinel Groups simultaneously, simulating live capital rotation over historical regime shifts.
+- **Analyst**: The system handles the "Margin Race Condition" flawlessly, ensuring 100% capital efficiency without locking up during explosive breakouts.
+- **Profitability Impact**: By centralizing capital rotation at the Group level, the ultimate `Super Program` concept is preserved for Phase 2 (allowing a Super Program to act as a master capital distributor, spawning multi-strike and multi-broker Sentinel Groups, e.g. 50% ATM, 25% OTM1). 
+
+### Iteration 1.4 (Overlord): Global Abstraction & Autonomy
+*Codename Logic: Overlord represents centralized command and control. We abstracted the core regime logic away from individual programs into a global Admin configuration, enabling true fleet-wide autonomy.*
+*Focus: Global Abstraction and Autonomous Execution.*
+- **PO**: Migrated Sentinel Settings (ADX period, ATR multipliers) from the main trading screen into a secured, system-wide Admin panel to prevent accidental overriding.
+- **Arch**: Introduced the `autonomous_sentinel` execution mode, completely decoupling Sentinel programs from manual entry gates (like IVR checks) so they strictly obey the global Regime Classifier.
+- **Data**: Centralized `SentinelConfig` schema ensuring that all child programs across all Sentinel Groups march to the exact same global market heartbeat.
+- **Analyst**: Guaranteed entry bypass logic for autonomous modes, ensuring Sentinel is never arbitrarily blocked by legacy configuration checks.
+- **Profitability Impact (Macro Responsiveness)**: By centralizing the regime logic globally, the trader can adjust the system's sensitivity (e.g. ATR multiplier) with a single click, instantly adapting the entire fleet of Sentinel Groups to shifting macroeconomic environments without needing to manually edit dozens of child programs.
+
+
 ### Iteration 2 (Valkyrie): The Augmentation Engine
 *Codename Logic: Valkyries guide warriors on the battlefield. Here, the system acts as the ultimate Co-Pilot, guiding the trader to optimal execution.*
 *Focus: System calculates, human approves.*
@@ -39,8 +76,8 @@ Every iteration is a calculated step to either **plug a leak** (slippage, latenc
 
 ## Phase 2: Data Dominance & Autonomous Scaling
 
-### Iteration 4 (Chronos): The Time-Series Backbone
-*Codename Logic: Chronos is the personification of time. This iteration introduces the Time-Series DB and historical tick data replay.*
+### Iteration 4 (Oracle): The Time-Series Backbone
+*Codename Logic: The Oracle sees all past and future possibilities. This iteration introduces the Time-Series DB and predictive historical analysis.*
 *Focus: Granular data analysis and historical validation.*
 - **PO**: Introduction of visual strategy backtesting directly in the UI. 
 - **Arch**: Introduce a dedicated Time-Series Database (TSDB) like InfluxDB or QuestDB.

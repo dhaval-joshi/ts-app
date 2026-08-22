@@ -159,17 +159,120 @@ function resetDialogScroll(rootId) {
   requestAnimationFrame(() => { scrollable.scrollTop = 0; });
 }
 
-function toast(msg, kind = "ok") {
-  const el = document.getElementById("snackbar");
-  if (!el) return;
-  const textEl = el.querySelector("[data-snackbar-text]");
-  if (textEl) textEl.textContent = msg;
-  el.classList.remove("bg-slate-800", "bg-red-600");
-  el.classList.add(kind === "error" ? "bg-red-600" : "bg-slate-800");
-  el.classList.add("show");
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.remove("show"), 4000);
+function toast(msg, type = "info") {
+  const bar = document.getElementById("snackbar");
+  bar.querySelector("[data-snackbar-text]").textContent = msg;
+  bar.className = `fixed left-4 right-4 sm:left-auto sm:right-4 sm:w-80 flex items-center gap-4 py-3 px-4 rounded-[0.3rem] shadow-lg text-white z-50 text-sm ${
+    type === "error" ? "bg-red-600" : type === "success" ? "bg-green-600" : "bg-slate-800"
+  } translate-y-0 opacity-100 transition-all duration-300`;
+  
+  if (window._toastTimeout) clearTimeout(window._toastTimeout);
+  window._toastTimeout = setTimeout(() => {
+    bar.classList.add("translate-y-10", "opacity-0");
+  }, 3000);
 }
+
+// -------------------------------------------------------- sentinel config UI
+
+async function loadSentinelConfig() {
+  try {
+    const res = await api("/api/sentinel/config");
+    
+    // Update top nav badge
+    const btn = document.getElementById("sentinelNavBtn");
+    const label = document.getElementById("sentinelNavLabel");
+    if (!btn) return;
+    
+    btn.classList.remove("hidden");
+    if (res.is_modified) {
+      btn.classList.add("bg-amber-50", "border-amber-200", "text-amber-700");
+      btn.classList.remove("bg-white", "border-slate-200", "text-slate-500");
+      label.textContent = "Sentinel (Modified)";
+    } else {
+      btn.classList.add("bg-white", "border-slate-200", "text-slate-500");
+      btn.classList.remove("bg-amber-50", "border-amber-200", "text-amber-700");
+      label.textContent = "Sentinel";
+    }
+
+    // Populate modal inputs
+    document.getElementById("s_adx_period").value = res.modified.adx_period;
+    document.getElementById("s_adx_threshold").value = res.modified.adx_directional_threshold;
+    document.getElementById("s_atr_period").value = res.modified.atr_period;
+    document.getElementById("s_atr_multiplier").value = res.modified.atr_volatile_multiplier;
+
+    // Build diff view
+    const diffContainer = document.getElementById("sentinelDiffView");
+    const diffLines = document.getElementById("sentinelDiffLines");
+    const resetBtn = document.getElementById("sentinelResetBtn");
+    
+    if (res.is_modified) {
+      diffContainer.classList.remove("hidden");
+      resetBtn.classList.remove("hidden");
+      diffLines.innerHTML = "";
+      for (const key of Object.keys(res.default)) {
+        if (res.default[key] !== res.modified[key]) {
+          diffLines.innerHTML += `
+            <div class="grid grid-cols-3 gap-2 py-1 border-b border-slate-100 last:border-0">
+              <div class="text-slate-600 font-medium">${key}</div>
+              <div class="text-slate-400 line-through">${res.default[key]}</div>
+              <div class="text-amber-700 font-bold">${res.modified[key]}</div>
+            </div>
+          `;
+        }
+      }
+    } else {
+      diffContainer.classList.add("hidden");
+      resetBtn.classList.add("hidden");
+    }
+  } catch (e) {
+    console.error("Failed to load Sentinel config:", e);
+  }
+}
+
+function openSentinelModal() {
+  loadSentinelConfig(); // refresh data
+  document.getElementById("sentinelModal").classList.remove("hidden");
+}
+
+function closeSentinelModal() {
+  document.getElementById("sentinelModal").classList.add("hidden");
+}
+
+async function saveSentinelConfig(e) {
+  e.preventDefault();
+  const payload = {
+    adx_period: parseInt(document.getElementById("s_adx_period").value, 10),
+    adx_directional_threshold: parseFloat(document.getElementById("s_adx_threshold").value),
+    atr_period: parseInt(document.getElementById("s_atr_period").value, 10),
+    atr_volatile_multiplier: parseFloat(document.getElementById("s_atr_multiplier").value)
+  };
+
+  try {
+    await api("/api/sentinel/config", { method: "PUT", body: JSON.stringify(payload) });
+    toast("Sentinel configuration updated", "success");
+    closeSentinelModal();
+    loadSentinelConfig();
+  } catch (err) {
+    toast("Failed to update Sentinel config: " + err.message, "error");
+  }
+}
+
+async function resetSentinelConfig() {
+  if (!confirm("Reset Sentinel configuration to factory defaults?")) return;
+  try {
+    await api("/api/sentinel/config/reset", { method: "POST" });
+    toast("Sentinel reset to defaults", "success");
+    closeSentinelModal();
+    loadSentinelConfig();
+  } catch (err) {
+    toast("Failed to reset Sentinel config: " + err.message, "error");
+  }
+}
+
+// Initial load
+document.addEventListener("DOMContentLoaded", () => {
+  loadSentinelConfig();
+});
 
 // Single shared websocket connection, one per page load -- multiple parts
 // of the app (Regular OMS's own render, Advanced OMS's card refresh) each
@@ -188,6 +291,8 @@ function connectStatusSocket() {
     if (msg.type === "orders") {
       _orderUpdateListeners.forEach((cb) => cb(msg.orders));
     }
+    // Dispatch custom event for other modules
+    window.dispatchEvent(new CustomEvent(`ws_${msg.type}`, { detail: msg }));
   };
   ws.onclose = () => setTimeout(connectStatusSocket, 3000);
   return ws;

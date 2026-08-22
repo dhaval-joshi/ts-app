@@ -190,10 +190,10 @@ def evaluate_entry(cfg: dict, *, index_snapshot: dict | None, ce_snapshot: dict 
     person and logged). Returns (allowed, reason_if_not,
     greeks_unverifiable).
     
-    If execution_mode == 'sentinel', we ignore the manual configuration
+    If execution_mode == 'sentinel' or 'autonomous_sentinel', we ignore the manual configuration
     and strictly evaluate based on target_regime vs active_regime.
     """
-    if execution_mode == "sentinel":
+    if execution_mode in ("sentinel", "autonomous_sentinel"):
         if active_regime == "UNKNOWN":
             return False, "Sentinel is blind (UNKNOWN regime due to data failure) -- safe halting entry.", False
         if target_regime != "ANY" and active_regime != target_regime:

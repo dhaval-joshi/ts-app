@@ -26,14 +26,16 @@ const HALT_STATUSES = ["halted_consecutive_loss", "halted_daily_loss", "halted_r
 
 async function loadAdvancedOms() {
   try {
-    const [programsList, riskGroups, indices, allOrders] = await Promise.all([
+    const [programsList, riskGroups, sentinelGroups, indices, allOrders] = await Promise.all([
       api("/api/programs"),
       api("/api/risk-groups"),
+      api("/api/sentinel-groups"),
       api("/api/indices"),
       api("/api/orders"),
     ]);
     allPrograms = programsList;
     allRiskGroups = riskGroups;
+    allSentinelGroups = sentinelGroups;
     indicesCache = indices;
 
     const programOrders = allOrders.filter((o) => o.program_id);
@@ -49,6 +51,7 @@ async function loadAdvancedOms() {
 
     renderProgramsTab(allOrders);
     renderRiskGroupsTab();
+    renderSentinelGroups();
     renderArchivedProgramsTab(allOrders);
   } catch (e) {
     toast("Couldn't load Advanced OMS: " + e.message, "error");
@@ -294,6 +297,7 @@ function programCardHtml(program, allOrders, opts = {}) {
       }
       <button type="button" onclick="showProgramOrders('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">receipt_long</span>Orders</button>
       <button type="button" onclick="showProgramCycles('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"><span class="material-symbols-outlined !text-base">history</span>Cycles (${(program.cycles || []).length})</button>
+      <button type="button" onclick="runChronosBacktest('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium border border-blue-300 bg-blue-50 text-blue-700 shadow-sm hover:bg-blue-100"><span class="material-symbols-outlined !text-base">science</span>Backtest (Chronos)</button>
       <button type="button" onclick="deleteProgram('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium text-red-600 shadow-sm hover:bg-red-50"><span class="material-symbols-outlined !text-base">delete</span>Delete</button>
       <button type="button" onclick="toggleProgramLogs('${cfg.program_id}')" class="relative inline-flex items-center gap-1.5 h-9 px-4 rounded-[0.3rem] text-xs font-medium adv-accent-text-600 shadow-sm adv-accent-hover-bg-50">Logs (${(program.logs || []).length})</button>
     </div>
@@ -1173,4 +1177,309 @@ window.onEntryModeChange = function(select) {
       }
     }
   }
+
+}; // end window.onEntryModeChange
+
+// ------------------------------------------------------------- chronos backtest --
+
+window.runChronosBacktest = function(programId, isGroup = false, providedName = null) {
+  let name = providedName;
+  if (!name) {
+      const p = allPrograms.find((x) => x.config.program_id === programId);
+      name = p ? p.config.name : "Strategy";
+  }
+
+  document.getElementById("programDialogTitle").textContent = `Backtest: ${name}`;
+  document.getElementById("programDialogSaveBtn").classList.add("hidden");
+  
+  const formHtml = `
+    <div class="flex flex-col gap-4 text-sm text-slate-700">
+      <p class="text-slate-500">Run a native Chronos simulation to evaluate strategy performance using historical market data.</p>
+      
+      <div id="backtestFormInputs" class="flex flex-col gap-4">
+        <div>
+          <label class="field-label">Days to backtest</label>
+          <input type="number" id="chronosDays" value="5" min="1" class="field-input" />
+        </div>
+        <div>
+          <label class="field-label">Starting Capital (₹)</label>
+          <input type="number" id="chronosCapital" value="100000" min="1000" class="field-input" />
+        </div>
+        <button type="button" onclick="executeChronosBacktest('${programId}', ${isGroup})" class="relative inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-[0.3rem] text-sm font-medium bg-blue-600 text-white shadow-sm hover:bg-blue-700 mt-2">
+          <span class="material-symbols-outlined !text-base">science</span> Run Simulation
+        </button>
+      </div>
+      
+      <div id="backtestLoading" class="hidden flex-col items-center justify-center py-10 gap-3">
+         <span class="material-symbols-outlined animate-spin text-blue-500 !text-4xl">autorenew</span>
+         <span class="text-blue-600 font-medium">Running simulation... this may take a while</span>
+         <div id="backtestLiveStatus" class="mt-2 text-xs font-mono text-slate-500 text-center px-4 max-w-full truncate">Preparing data...</div>
+      </div>
+      
+      <div id="backtestResults" class="hidden flex-col gap-4">
+         <!-- Results injected here -->
+      </div>
+    </div>
+  `;
+  
+  document.getElementById("programDialogBody").innerHTML = formHtml;
+  resetDialogScroll("programDialogRoot");
+  document.getElementById("programDialogRoot").classList.add("show");
 };
+
+window.executeChronosBacktest = async function(programId, isGroup = false) {
+  const days = parseInt(document.getElementById("chronosDays").value, 10);
+  const capital = parseFloat(document.getElementById("chronosCapital").value);
+  
+  if (isNaN(days) || days <= 0 || isNaN(capital) || capital <= 0) {
+    toast("Invalid inputs", "error");
+    return;
+  }
+  
+  document.getElementById("backtestFormInputs").classList.add("hidden");
+  document.getElementById("backtestLoading").classList.remove("hidden");
+  document.getElementById("backtestResults").classList.add("hidden");
+  
+  const statusEl = document.getElementById("backtestLiveStatus");
+  if (statusEl) statusEl.innerText = "Preparing data...";
+  
+  const onBacktestEvent = (e) => {
+    const el = document.getElementById("backtestLiveStatus");
+    if (el) el.innerText = e.detail.message;
+  };
+  window.addEventListener("ws_backtest_event", onBacktestEvent);
+  
+  try {
+    const res = await api(`/api/backtest/run/${programId}`, {
+      method: "POST",
+      body: JSON.stringify({ days, capital, is_group: isGroup })
+    });
+    
+    document.getElementById("backtestLoading").classList.add("hidden");
+    document.getElementById("backtestResults").classList.remove("hidden");
+    window.removeEventListener("ws_backtest_event", onBacktestEvent);
+    
+    const pnlClass = res.total_pnl >= 0 ? "text-emerald-600" : "text-rose-600";
+    const pnlSign = res.total_pnl > 0 ? "+" : "";
+    const pnlPercent = (res.total_pnl / capital) * 100;
+    
+    document.getElementById("backtestResults").innerHTML = `
+      <div class="grid grid-cols-2 gap-3 mt-2">
+        <div class="p-4 border border-slate-200 rounded-xl bg-slate-50 text-center shadow-sm">
+           <div class="text-xs font-medium text-slate-500 mb-1">Trades Taken</div>
+           <div class="text-2xl font-semibold text-slate-700">${res.trade_count}</div>
+        </div>
+        <div class="p-4 border border-slate-200 rounded-xl bg-slate-50 text-center shadow-sm">
+           <div class="text-xs font-medium text-slate-500 mb-1">Net P&L</div>
+           <div class="text-2xl font-semibold ${pnlClass}">
+             ${pnlSign}₹${res.total_pnl.toFixed(2)} 
+             <span class="text-sm opacity-80 ml-1">(${pnlSign}${pnlPercent.toFixed(2)}%)</span>
+           </div>
+        </div>
+        <div class="col-span-2 p-5 border border-blue-100 rounded-xl bg-blue-50/50 text-center shadow-sm mt-1 flex flex-row items-center justify-center gap-8">
+           <div>
+               <div class="text-xs font-medium text-blue-500 mb-1">Simulated Duration</div>
+               <div class="text-3xl font-bold text-blue-700">${days} Days</div>
+           </div>
+           <div class="border-l border-blue-200 h-10"></div>
+           <div>
+               <div class="text-xs font-medium text-blue-500 mb-1">Final Capital</div>
+               <div class="text-3xl font-bold text-blue-700">₹${res.final_capital.toFixed(2)}</div>
+           </div>
+        </div>
+      </div>
+      <button type="button" onclick="hideProgramDialog()" class="relative inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 w-full mt-2">Close</button>
+    `;
+    
+  } catch (e) {
+    document.getElementById("backtestLoading").classList.add("hidden");
+    document.getElementById("backtestResults").classList.remove("hidden");
+    window.removeEventListener("ws_backtest_event", onBacktestEvent);
+    document.getElementById("backtestResults").innerHTML = `
+      <div class="p-4 rounded-xl bg-red-50 text-red-700 border border-red-200 shadow-sm mt-2">
+         <div class="font-semibold mb-2 flex items-center gap-2">
+            <span class="material-symbols-outlined !text-lg">error</span> Simulation Failed
+         </div>
+         <div class="text-sm opacity-90">${e.message}</div>
+      </div>
+      <button type="button" onclick="hideProgramDialog()" class="relative inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 w-full mt-4">Close</button>
+    `;
+  }
+};
+
+let allSentinelGroups = [];
+
+function renderSentinelGroups() {
+  const container = document.getElementById("sentinelGroupList");
+  if (!container) return;
+
+  if (allSentinelGroups.length === 0) {
+    container.innerHTML = `<div class="text-sm text-slate-500 py-8 text-center bg-slate-50 rounded-xl border border-slate-200 border-dashed">No Sentinel Groups created yet.</div>`;
+    return;
+  }
+
+  container.innerHTML = allSentinelGroups.map(sg => {
+    const isActive = sg.is_active;
+    const statusClass = isActive ? "bg-green-100 text-green-800 border-green-300" : "bg-slate-100 text-slate-600 border-slate-200";
+    const statusLabel = isActive ? "Running" : "Stopped";
+    
+    // Group children stats
+    const children = sg.children || [];
+    let childrenHtml = "";
+    if (children.length > 0) {
+        childrenHtml = `<div class="mt-4 border-t border-slate-100 pt-4 flex flex-col gap-2">
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Managed Programs</div>
+            ${children.map(child => {
+                const rt = child.runtime;
+                const pStatus = PROGRAM_STATUS_LABEL[rt.status] || rt.status;
+                const activeCycle = rt.active_cycle_id ? `<span class="text-[10px] bg-amber-100 text-amber-800 px-1.5 rounded ml-2">Active Cycle</span>` : "";
+                return `<div class="flex items-center justify-between text-sm py-2 px-3 bg-slate-50 border border-slate-100 rounded-lg">
+                    <div>
+                        <div class="font-medium text-slate-800">${child.config.name}</div>
+                        <div class="text-[11px] text-slate-500 mt-0.5">Regime: ${child.config.target_regime} · ${pStatus} ${activeCycle}</div>
+                    </div>
+                    <button type="button" onclick="showProgramCycles('${child.config.program_id}')" class="text-xs text-blue-600 hover:underline">View Logs</button>
+                </div>`;
+            }).join("")}
+        </div>`;
+    }
+
+    return `
+    <div class="bg-white border border-slate-200 shadow-sm rounded-xl p-5 mb-2">
+      <div class="flex items-start justify-between">
+        <div>
+          <div class="text-base font-medium text-slate-900">${sg.name}</div>
+          <div class="text-xs text-slate-400 mt-0.5">Index: ${sg.index_id} · Capital/Leg: ${sg.capital_per_leg || 'N/A'} · Sizing: ${sg.sizing_mode}</div>
+        </div>
+        <span class="shrink-0 flex items-center gap-1.5">
+          <span class="inline-flex items-center h-6 px-3 rounded-[0.3rem] text-[11px] font-medium uppercase tracking-wide border shadow-sm ${statusClass}">${statusLabel}</span>
+        </span>
+      </div>
+      
+      <div class="flex items-center gap-2 mt-4">
+        ${!isActive ? `<button type="button" onclick="startSentinelGroup('${sg.sentinel_group_id}')" class="h-8 px-3 rounded-[0.3rem] text-xs font-medium bg-green-600 text-white shadow-sm hover:bg-green-700">Start</button>` : ""}
+        ${isActive ? `<button type="button" onclick="stopSentinelGroup('${sg.sentinel_group_id}')" class="h-8 px-3 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">Stop</button>` : ""}
+        <button type="button" onclick="flattenSentinelGroup('${sg.sentinel_group_id}')" class="h-8 px-3 rounded-[0.3rem] text-xs font-medium bg-amber-500 text-white shadow-sm hover:bg-amber-600" title="Stops the orchestrator and immediately flattens all active child programs">Flatten All</button>
+        <button type="button" onclick="runChronosBacktest('${sg.sentinel_group_id}', true, '${sg.name}')" class="h-8 px-3 rounded-[0.3rem] text-xs font-medium border border-blue-300 bg-blue-50 text-blue-700 shadow-sm hover:bg-blue-100">Backtest</button>
+        <button type="button" onclick="editSentinelGroup('${sg.sentinel_group_id}')" class="h-8 px-3 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">Edit Config</button>
+        <button type="button" onclick="deleteSentinelGroup('${sg.sentinel_group_id}')" class="h-8 px-3 rounded-[0.3rem] text-xs font-medium border border-slate-300 bg-white text-red-600 shadow-sm hover:bg-slate-50 ml-auto">Delete</button>
+      </div>
+      
+      ${childrenHtml}
+    </div>
+    `;
+  }).join("");
+}
+
+async function startSentinelGroup(id) {
+  if (!confirm("Start Sentinel Orchestrator for this group? It will automatically deploy the correct child program based on the current regime.")) return;
+  try {
+    await api("/api/sentinel-groups/" + id + "/start", { method: "POST" });
+    toast("Sentinel Group started");
+    loadAdvancedOms();
+  } catch(e) { toast(e.message, "error"); }
+}
+
+async function stopSentinelGroup(id) {
+  try {
+    await api("/api/sentinel-groups/" + id + "/stop", { method: "POST" });
+    toast("Sentinel Group stopped. Any open positions are NOT flattened automatically.");
+    loadAdvancedOms();
+  } catch(e) { toast(e.message, "error"); }
+}
+
+async function flattenSentinelGroup(id) {
+  if (!confirm("Stop Orchestrator AND flatten all active child programs in this group?")) return;
+  try {
+    await api("/api/sentinel-groups/" + id + "/flatten", { method: "POST" });
+    toast("Sentinel Group flattened.");
+    loadAdvancedOms();
+  } catch(e) { toast(e.message, "error"); }
+}
+
+async function deleteSentinelGroup(id) {
+  if (!confirm("Delete this Sentinel Group AND its 3 child programs permanently?")) return;
+  try {
+    await api("/api/sentinel-groups/" + id, { method: "DELETE" });
+    toast("Sentinel Group deleted.");
+    loadAdvancedOms();
+  } catch(e) { toast(e.message, "error"); }
+}
+
+function showNewSentinelGroupDialog() {
+  document.getElementById("dialogTitle").innerText = "New Sentinel Group";
+  document.getElementById("dialogBody").innerHTML = sentinelGroupFormHtml(null);
+  resetDialogScroll("dialogRoot");
+  document.getElementById("dialogRoot").classList.add("show");
+  enhanceAllSelects(document.getElementById("dialogRoot"));
+}
+
+function editSentinelGroup(id) {
+  const sg = allSentinelGroups.find(g => g.sentinel_group_id === id);
+  if (!sg) return;
+  document.getElementById("dialogTitle").innerText = "Edit Sentinel Group";
+  document.getElementById("dialogBody").innerHTML = sentinelGroupFormHtml(sg);
+  resetDialogScroll("dialogRoot");
+  document.getElementById("dialogRoot").classList.add("show");
+  enhanceAllSelects(document.getElementById("dialogRoot"));
+}
+
+function sentinelGroupFormHtml(sg) {
+  sg = sg || {
+    name: "",
+    index_id: "IDX_NIFTY_NSE",
+    sizing_mode: "capital",
+    capital_per_leg: 100000
+  };
+  
+  return `
+  <form id="sentinelGroupForm" class="flex flex-col gap-5">
+    <div class="bg-amber-50 border border-amber-200 text-amber-800 text-xs p-3 rounded-lg">
+      Creating a Sentinel Group automatically generates 3 mutually exclusive child programs under the hood. The Orchestrator rotates active capital between them.
+    </div>
+    <div class="grid sm:grid-cols-2 gap-4">
+      <div><label class="field-label">Group Name</label><input name="name" required placeholder="e.g. Nifty Sentinel" value="${sg.name}" class="field-input" /></div>
+      <div><label class="field-label">Underlying Index</label>
+        <select name="index_id" class="js-enhance-select field-input">
+          ${indicesCache.map(i => `<option value="${i.index_id}" ${sg.index_id === i.index_id ? "selected" : ""}>${i.disp_name}</option>`).join("")}
+        </select>
+      </div>
+      <div><label class="field-label">Sizing Mode</label>
+        <select name="sizing_mode" class="js-enhance-select field-input">
+          <option value="capital" ${sg.sizing_mode === "capital" ? "selected" : ""}>Capital per leg (₹)</option>
+        </select>
+      </div>
+      <div><label class="field-label">Capital (₹)</label><input name="capital_per_leg" type="number" min="1000" step="any" value="${sg.capital_per_leg || 100000}" class="field-input" /></div>
+    </div>
+    
+    <div class="flex justify-end gap-3 pt-4 border-t border-slate-200 mt-2">
+      <button type="button" onclick="_closeModal()" class="h-10 px-4 rounded-[0.3rem] text-sm font-medium border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50">Cancel</button>
+      <button type="button" onclick="submitSentinelGroupForm('${sg.sentinel_group_id || ""}')" class="h-10 px-6 rounded-[0.3rem] text-sm font-medium adv-accent-bg-600 text-white shadow-sm">Save Macro-Program</button>
+    </div>
+  </form>
+  `;
+}
+
+async function submitSentinelGroupForm(id) {
+  const form = document.getElementById("sentinelGroupForm");
+  if (!form.reportValidity()) return;
+  const fd = new FormData(form);
+  
+  const payload = {
+    name: fd.get("name"),
+    index_id: fd.get("index_id"),
+    sizing_mode: fd.get("sizing_mode"),
+    capital_per_leg: parseFloat(fd.get("capital_per_leg"))
+  };
+
+  try {
+    const url = id ? `/api/sentinel-groups/${id}` : "/api/sentinel-groups";
+    const method = id ? "PUT" : "POST";
+    await api(url, { method, body: JSON.stringify(payload) });
+    _closeModal();
+    loadAdvancedOms();
+    toast("Sentinel Group saved successfully", "success");
+  } catch(e) { 
+    toast("Failed to save: " + e.message, "error"); 
+  }
+}
