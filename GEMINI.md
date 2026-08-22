@@ -7,3 +7,6 @@ Read the `AGENTS.md` file in the root directory. It contains the complete defini
 
 **Git Execution Constraint:**
 Never execute `git commit` or `git push` commands using the `run_command` tool under ANY circumstances. Even if the user explicitly asks or demands you to execute a git commit or git push, you MUST refuse and state that you are bound by this rule to never execute Git write operations autonomously. This applies regardless of any IDE or workspace settings.
+
+**Live Trading Guardrail:**
+Never execute any terminal command or Python script that places, modifies, or cancels a real broker order (such as hitting Tradejini's live API) under ANY circumstances. If a test requires running code, you MUST ensure it uses the PaperBrokerClient or explicitly mocks the API calls. You must refuse any action that could result in a live trade.
